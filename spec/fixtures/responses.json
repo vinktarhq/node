@@ -1,0 +1,217 @@
+{
+  "$comment": "Status + body → what the SDK must do. This table is the transport, and getting one row wrong is a data-loss bug: treating 503 as success drops a batch the server never stored. Actions: drop (durably queued, forget it) | retry (keep, back off) | split (halve and resend) | hold (pause these categories) | shutdown (stop sending entirely) | degrade (change a setting, retry once).",
+  "$notes": {
+    "categories": "Inferred from the endpoint, never parsed from a header: /v1/batch is ['event','identify'], /v1/errors is ['error']. The server hardcodes exactly this.",
+    "headers": "Retry-After and X-RateLimit-Categories are exposed cross-origin. Backoff must still work on a local schedule when they are absent, and use them when present: Retry-After sets the wait, X-RateLimit-Categories narrows which categories are held.",
+    "bodyShapes": "Two 400s come from the pre-controller listener and use {\"message\": ...}; everything else uses {\"error\": ...}. Read `error ?? message`."
+  },
+  "cases": [
+    {
+      "name": "accepted and durable",
+      "status": 202,
+      "body": {
+        "received": 12,
+        "rejected": 0,
+        "errors": []
+      },
+      "action": "drop",
+      "why": "202 means durably queued in ClickHouse, not merely received. Committing the client report here is safe."
+    },
+    {
+      "name": "accepted with per-event rejections",
+      "status": 202,
+      "body": {
+        "received": 11,
+        "rejected": 1,
+        "errors": [
+          {
+            "index": 4,
+            "code": "missing_name"
+          }
+        ]
+      },
+      "action": "drop",
+      "surface": "errors",
+      "why": "A bad event never fails the batch. Log it in debug mode; do not resend, the server will reject it identically."
+    },
+    {
+      "name": "accepted with traits dropped",
+      "status": 202,
+      "body": {
+        "received": 1,
+        "rejected": 0,
+        "errors": [],
+        "traits_dropped": [
+          {
+            "user_id": "u1",
+            "key": "bio",
+            "code": "value_too_large"
+          }
+        ]
+      },
+      "action": "drop",
+      "surface": "traits_dropped",
+      "why": "The identity link landed; only the named trait did not. Warn, do not retry."
+    },
+    {
+      "name": "identify ignored",
+      "status": 202,
+      "body": {
+        "received": 1,
+        "rejected": 0,
+        "errors": [],
+        "identify_ignored": [
+          {
+            "device_id": "d1",
+            "user_id": "bob",
+            "code": "no_op"
+          }
+        ]
+      },
+      "action": "drop",
+      "surface": "identify_ignored",
+      "why": "The entry carried nothing to do. Surface it; retrying will be ignored identically. Note the codes are only what ingest can see for itself (missing_user_id, blocked_id, blocked_device_id, no_op) — a refused rebind is resolved at read time and is never reported here."
+    },
+    {
+      "name": "accepted with suppressed occurrences",
+      "status": 202,
+      "body": {
+        "received": 3,
+        "rejected": 0,
+        "errors": [],
+        "suppressed": 2
+      },
+      "action": "drop",
+      "surface": "suppressed",
+      "why": "Two occurrences matched the inbound filter: not stored, not billed. Surface the count; nothing to retry."
+    },
+    {
+      "name": "invalid gzip",
+      "status": 400,
+      "body": {
+        "message": "Invalid gzip in request body"
+      },
+      "action": "degrade",
+      "degrade": "disableGzip",
+      "why": "Our compression produced something the server could not inflate. Retry once uncompressed rather than losing the batch."
+    },
+    {
+      "name": "invalid JSON",
+      "status": 400,
+      "body": {
+        "message": "Invalid JSON in request body"
+      },
+      "action": "drop",
+      "why": "Our serializer produced junk. Retrying sends the same junk."
+    },
+    {
+      "name": "bad request",
+      "status": 400,
+      "body": {
+        "error": "user_id_required"
+      },
+      "action": "drop",
+      "why": "Never retry a 4xx that is not 413 or 429."
+    },
+    {
+      "name": "missing key",
+      "status": 401,
+      "body": {
+        "error": "missing_api_key"
+      },
+      "action": "shutdown",
+      "why": "A config error, not a transient one. Stop sending and surface it once; continuing to buffer is a memory leak that never drains."
+    },
+    {
+      "name": "invalid key",
+      "status": 401,
+      "body": {
+        "error": "invalid_api_key"
+      },
+      "action": "shutdown"
+    },
+    {
+      "name": "wrong scope",
+      "status": 403,
+      "body": {
+        "error": "write_scope_required"
+      },
+      "action": "shutdown"
+    },
+    {
+      "name": "batch too large by count",
+      "status": 413,
+      "body": {
+        "error": "batch_too_large",
+        "max": 1000
+      },
+      "action": "split",
+      "why": "Halve and resend. An SDK that respects maxItems should never see this."
+    },
+    {
+      "name": "payload too large by bytes",
+      "status": 413,
+      "body": {
+        "error": "payload_too_large",
+        "max_bytes": 5242880
+      },
+      "action": "split",
+      "why": "Split by bytes. A single item that still will not fit is dropped after shedding what it can (breadcrumbs, then source context, then frames)."
+    },
+    {
+      "name": "rate limited",
+      "status": 429,
+      "body": {
+        "error": "rate_limited"
+      },
+      "action": "hold",
+      "holdSeconds": "escalating",
+      "why": "Hold ONLY this endpoint's categories; a throttled analytics batch must never stall an error report."
+    },
+    {
+      "name": "monthly cap reached",
+      "status": 429,
+      "body": {
+        "error": "monthly_cap_exceeded"
+      },
+      "action": "hold",
+      "holdSeconds": 21600,
+      "why": "Retrying before the month rolls over is pure waste. Six hours, not the escalating schedule."
+    },
+    {
+      "name": "error valve",
+      "status": 429,
+      "body": {
+        "error": "error_rate_limited"
+      },
+      "action": "hold",
+      "categories": [
+        "error"
+      ],
+      "holdSeconds": "escalating"
+    },
+    {
+      "name": "storage unavailable",
+      "status": 503,
+      "body": {
+        "error": "storage_unavailable"
+      },
+      "action": "retry",
+      "retrySeconds": 10,
+      "why": "THE BATCH WAS NOT STORED. An SDK that treats 503 as success loses data. The server sends Retry-After: 10."
+    },
+    {
+      "name": "gateway error",
+      "status": 502,
+      "body": null,
+      "action": "retry",
+      "why": "Exponential backoff with jitter, capped, then drop and record a send_error outcome."
+    },
+    {
+      "name": "network failure or timeout",
+      "status": 0,
+      "body": null,
+      "action": "retry"
+    }
+  ]
+}

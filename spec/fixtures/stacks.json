@@ -1,0 +1,214 @@
+{
+  "$comment": "Real captured Error.stack strings, one per engine. Frames on the wire are crash-LAST and columns are 0-BASED; every engine gives the opposite of both, so these are the two things an SDK gets backwards. `frames` below is already in wire order, so the LAST entry is the crash site.",
+  "$note": "Columns here are the wire values (already decremented). A stack with no column information omits `col` entirely rather than inventing a 0, which would be indistinguishable from a real first-column frame.",
+  "cases": [
+    {
+      "name": "V8 / Chrome",
+      "stack": "TypeError: Cannot read properties of null (reading 'id')\n    at getUser (https://app.example.com/assets/app-DfK29aQx.js:12:34)\n    at Object.handler (https://app.example.com/assets/app-DfK29aQx.js:40:9)\n    at https://app.example.com/assets/vendor-a1b2.js:1:100",
+      "frames": [
+        {
+          "file": "https://app.example.com/assets/vendor-a1b2.js",
+          "line": 1,
+          "col": 99,
+          "in_app": true
+        },
+        {
+          "file": "https://app.example.com/assets/app-DfK29aQx.js",
+          "function": "Object.handler",
+          "line": 40,
+          "col": 8,
+          "in_app": true
+        },
+        {
+          "file": "https://app.example.com/assets/app-DfK29aQx.js",
+          "function": "getUser",
+          "line": 12,
+          "col": 33,
+          "in_app": true
+        }
+      ]
+    },
+    {
+      "name": "V8 with async and constructor frames",
+      "stack": "Error: boom\n    at new Widget (https://x.test/app.js:5:11)\n    at async Loader.load (https://x.test/app.js:20:3)",
+      "frames": [
+        {
+          "file": "https://x.test/app.js",
+          "function": "async Loader.load",
+          "line": 20,
+          "col": 2,
+          "in_app": true
+        },
+        {
+          "file": "https://x.test/app.js",
+          "function": "new Widget",
+          "line": 5,
+          "col": 10,
+          "in_app": true
+        }
+      ]
+    },
+    {
+      "name": "Firefox / Gecko",
+      "stack": "getUser@https://app.example.com/assets/app.js:12:34\nhandler@https://app.example.com/assets/app.js:40:9\n@https://app.example.com/assets/app.js:60:1",
+      "frames": [
+        {
+          "file": "https://app.example.com/assets/app.js",
+          "line": 60,
+          "col": 0,
+          "in_app": true
+        },
+        {
+          "file": "https://app.example.com/assets/app.js",
+          "function": "handler",
+          "line": 40,
+          "col": 8,
+          "in_app": true
+        },
+        {
+          "file": "https://app.example.com/assets/app.js",
+          "function": "getUser",
+          "line": 12,
+          "col": 33,
+          "in_app": true
+        }
+      ]
+    },
+    {
+      "name": "Safari / WebKit keeps its special frame names",
+      "stack": "getUser@https://x.test/app.js:12:34\nglobal code@https://x.test/app.js:60:1",
+      "frames": [
+        {
+          "file": "https://x.test/app.js",
+          "function": "global code",
+          "line": 60,
+          "col": 0,
+          "in_app": true
+        },
+        {
+          "file": "https://x.test/app.js",
+          "function": "getUser",
+          "line": 12,
+          "col": 33,
+          "in_app": true
+        }
+      ]
+    },
+    {
+      "name": "node_modules is not the customer's code",
+      "stack": "Error: boom\n    at parse (https://x.test/node_modules/lib/index.js:3:1)\n    at mine (https://x.test/src/app.js:9:1)",
+      "frames": [
+        {
+          "file": "https://x.test/src/app.js",
+          "function": "mine",
+          "line": 9,
+          "col": 0,
+          "in_app": true
+        },
+        {
+          "file": "https://x.test/node_modules/lib/index.js",
+          "function": "parse",
+          "line": 3,
+          "col": 0,
+          "in_app": false
+        }
+      ]
+    },
+    {
+      "name": "extension frames are not in-app",
+      "stack": "Error: boom\n    at f (chrome-extension://abcdef/content.js:1:1)",
+      "frames": [
+        {
+          "file": "chrome-extension://abcdef/content.js",
+          "function": "f",
+          "line": 1,
+          "col": 0,
+          "in_app": false
+        }
+      ]
+    },
+    {
+      "name": "native and anonymous frames carry no location and are dropped",
+      "stack": "Error: boom\n    at Array.forEach (native)\n    at real (https://x.test/app.js:1:1)",
+      "frames": [
+        {
+          "file": "https://x.test/app.js",
+          "function": "real",
+          "line": 1,
+          "col": 0,
+          "in_app": true
+        }
+      ]
+    },
+    {
+      "name": "an empty stack yields no frames rather than a fabricated one",
+      "stack": "",
+      "frames": []
+    },
+    {
+      "name": "a header line alone is not a frame",
+      "stack": "TypeError: x is not a function",
+      "frames": []
+    },
+    {
+      "name": "Node with async frames, a file URL and the async separator",
+      "stack": "Error: x\n    at async load (file:///srv/app/src/loader.js:3:5)\n    ----\n    at Object.<anonymous> (/srv/app/src/index.js:1:1)",
+      "frames": [
+        {
+          "file": "/srv/app/src/index.js",
+          "function": "Object.<anonymous>",
+          "line": 1,
+          "col": 0,
+          "in_app": true
+        },
+        {
+          "file": "/srv/app/src/loader.js",
+          "function": "async load",
+          "line": 3,
+          "col": 4,
+          "in_app": true
+        }
+      ]
+    },
+    {
+      "name": "a webpack (error: …) wrapper is unwrapped",
+      "stack": "Error: x\n    at f (error: https://x.test/app.js:1:2)",
+      "frames": [
+        {
+          "file": "https://x.test/app.js",
+          "function": "f",
+          "line": 1,
+          "col": 1,
+          "in_app": true
+        }
+      ]
+    },
+    {
+      "name": "a recursion is collapsed to one copy of its cycle",
+      "stack": "RangeError: Maximum call stack size exceeded\n    at a (https://x.test/app.js:1:1)\n    at b (https://x.test/app.js:2:1)\n    at a (https://x.test/app.js:1:1)\n    at b (https://x.test/app.js:2:1)\n    at a (https://x.test/app.js:1:1)\n    at b (https://x.test/app.js:2:1)\n    at main (https://x.test/app.js:9:1)",
+      "frames": [
+        {
+          "file": "https://x.test/app.js",
+          "function": "main",
+          "line": 9,
+          "col": 0,
+          "in_app": true
+        },
+        {
+          "file": "https://x.test/app.js",
+          "function": "b",
+          "line": 2,
+          "col": 0,
+          "in_app": true
+        },
+        {
+          "file": "https://x.test/app.js",
+          "function": "a",
+          "line": 1,
+          "col": 0,
+          "in_app": true
+        }
+      ]
+    }
+  ]
+}

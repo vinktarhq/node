@@ -1,0 +1,80 @@
+{
+  "$comment": "The ingest limits published at https://vinktar.com/api.md. Do not edit by hand: the tests assert the SDK constants match this file.",
+  "request": {
+    "maxBodyBytes": 5242880,
+    "maxSourcemapBodyBytes": 62914560,
+    "gzipEncodings": [
+      "gzip"
+    ],
+    "sentryEncodings": [
+      "gzip",
+      "deflate"
+    ]
+  },
+  "batch": {
+    "maxItems": 1000,
+    "maxPropertiesPerEvent": 255,
+    "maxStringBytes": 255,
+    "maxNestingDepth": 3,
+    "timestampWindow": {
+      "past": "-7 days",
+      "future": "+1 hour"
+    }
+  },
+  "traits": {
+    "maxValueBytes": 255,
+    "maxKeyBytes": 128,
+    "maxKeysPerRequest": 100,
+    "maxRequestBytes": 8192,
+    "maxKeysPerUser": 100,
+    "maxBytesPerUser": 8192,
+    "valueTypes": [
+      "string",
+      "number",
+      "boolean"
+    ]
+  },
+  "errors": {
+    "maxItems": 50,
+    "maxExceptions": 5,
+    "maxFrames": 50,
+    "maxTypeBytes": 256,
+    "maxMessageBytes": 8192,
+    "maxStackRawBytes": 16384,
+    "maxFrameStringBytes": 512,
+    "maxExceptionsBytes": 262144,
+    "maxBreadcrumbs": 50,
+    "maxBreadcrumbsBytes": 32768,
+    "maxTags": 32,
+    "maxTagKeyBytes": 32,
+    "maxTagValueBytes": 200,
+    "maxFingerprintParts": 8,
+    "maxFingerprintPartBytes": 128,
+    "levels": [
+      "fatal",
+      "error",
+      "warning",
+      "info"
+    ],
+    "mechanisms": [
+      "onerror",
+      "onunhandledrejection",
+      "uncaughtException",
+      "unhandledRejection",
+      "manual"
+    ],
+    "frameOrder": "crash-last",
+    "exceptionOrder": "thrown-first",
+    "columnBase": 0
+  },
+  "sourcemaps": {
+    "maxFileBytes": 20971520,
+    "maxRequestBytes": 62914560,
+    "recommendedBatchBytes": 16777216,
+    "concurrency": 4,
+    "compression": [
+      "gzip"
+    ],
+    "maxNameBytes": 64
+  }
+}

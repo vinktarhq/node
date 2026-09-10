@@ -1,0 +1,46 @@
+{
+  "$comment": "Deterministic sampling must agree across every SDK, or a customer running a browser and a server SDK gets two different populations for one funnel.",
+  "algorithm": "FNV-1a, 32-bit, over UTF-8 BYTES, divided by 0xFFFFFFFF. Hashing UTF-16 code units instead is invisible for ASCII ids and silently wrong for any id containing an accent.",
+  "cases": [
+    {
+      "unit": "user_123",
+      "hash": 0.07687349083760601
+    },
+    {
+      "unit": "alice",
+      "hash": 0.5278637352231572
+    },
+    {
+      "unit": "",
+      "hash": 0.504342900008043
+    },
+    {
+      "unit": "a",
+      "hash": 0.8908105597111421
+    },
+    {
+      "unit": "device:abc",
+      "hash": 0.2543881883040043
+    },
+    {
+      "unit": "01J8Z4Q1XYZ",
+      "hash": 0.05644258462275439
+    },
+    {
+      "unit": "dana@example.com",
+      "hash": 0.6869280195531733
+    },
+    {
+      "unit": "ünïcödé",
+      "hash": 0.1910853279268102
+    },
+    {
+      "unit": "用户",
+      "hash": 0.10895989674817769
+    },
+    {
+      "unit": "user_123 ",
+      "hash": 0.015170047761679172
+    }
+  ]
+}

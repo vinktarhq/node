@@ -1,0 +1,22 @@
+{
+  "$comment": "Ids that are never a real person; the server rejects them with code blocked_id. Compared case-insensitively against the trimmed value, and the empty string is blocked too.",
+  "blocked": [
+    "anonymous",
+    "guest",
+    "distinct_id",
+    "distinctid",
+    "device_id",
+    "deviceid",
+    "user_id",
+    "userid",
+    "id",
+    "undefined",
+    "null",
+    "nan",
+    "none",
+    "true",
+    "false",
+    "0",
+    "[object object]"
+  ]
+}

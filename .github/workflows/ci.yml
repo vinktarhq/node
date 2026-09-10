@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The whole suite on every Node the package promises.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22', '24']
+    name: test (node ${{ matrix.node }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.node }}' }
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test
+
+  # The package as PUBLISHED, not as a source tree. `npm test` imports from `src/`, so it can pass
+  # while the tarball is unusable: an export map missing its `require` condition, a `files` list
+  # that ships no `dist`, an edge condition pointing at a file that is not there.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    name: tarball
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install
+      - name: install it somewhere else and use it
+        run: |
+          set -e
+          tarball="$PWD/$(npm pack --silent | tail -1)"
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y > /dev/null
+          npm install "$tarball"
+          node -e "const m=require('@vinktarhq/node'); for (const k of ['init','withScope','scopeFromHeaders']) if(typeof m[k]!=='function') process.exit(1)"
+          node -e "const m=require('@vinktarhq/node/express'); if(typeof m.vinktarRequest!=='function') process.exit(1)"
+          node -e "const m=require('@vinktarhq/node/fastify'); if(typeof m.vinktarFastify!=='function') process.exit(1)"
+          node -e "const m=require('@vinktarhq/node/nest'); if(typeof m.VinktarExceptionFilter!=='function') process.exit(1)"
+          node -e "const m=require('@vinktarhq/node/edge'); if(typeof m.flushIfServerless!=='function') process.exit(1)"
+          node --input-type=module -e "const m=await import('@vinktarhq/node'); if(typeof m.init!=='function') process.exit(1)"
+          # An adapter must see the client the facade initialised: one runtime chunk, not a copy per entry.
+          node -e "const m=require('@vinktarhq/node'); m.init({writeKey:'vnk_sk_smoke',fetch:async()=>new Response('{}',{status:202})}); const {vinktarRequest}=require('@vinktarhq/node/express'); vinktarRequest()({method:'GET',url:'/x',headers:{}},{statusCode:200},()=>{ if(m.scope().request===undefined) process.exit(1); }); m.close()"
+          node --input-type=module -e "const m=await import('@vinktarhq/node'); m.init({writeKey:'vnk_sk_smoke',fetch:async()=>new Response('{}',{status:202})}); const {vinktarRequest}=await import('@vinktarhq/node/express'); vinktarRequest()({method:'GET',url:'/x',headers:{}},{statusCode:200},()=>{ if(m.scope().request===undefined) process.exit(1); }); await m.close()"
+          node --conditions=edge-light -e "if(!require.resolve('@vinktarhq/node').endsWith('edge.js')) process.exit(1)"
+          # The edge build must not reach for a node: module.
+          ! grep -E "from ['\"]node:|require\(['\"]node:" node_modules/@vinktarhq/node/dist/edge.js

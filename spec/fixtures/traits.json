@@ -1,0 +1,102 @@
+{
+  "$comment": "Trait parsing conformance. Every SDK runs these and must produce the identical result, because a trait that means one thing in the PHP SDK and another in the browser SDK is a bug nobody will find until a dashboard is wrong. `set`/`setOnce` values are JSON-encoded scalars; `drops` is order-insensitive.",
+  "cases": [
+    {
+      "name": "scalars keep their JSON type",
+      "in": { "$set": { "plan": "pro", "seats": 12, "trial": true, "score": 1.5 } },
+      "out": {
+        "set": { "plan": "\"pro\"", "seats": "12", "trial": "true", "score": "1.5" },
+        "setOnce": {}, "unset": [], "drops": []
+      }
+    },
+    {
+      "name": "bare reserved spellings normalise into the $ namespace",
+      "in": { "$set": { "email": "a@b.com", "name": "Alice", "createdAt": "2026-08-01" } },
+      "out": {
+        "set": { "$email": "\"a@b.com\"", "$name": "\"Alice\"", "$created": "\"2026-08-01\"" },
+        "setOnce": {}, "unset": [], "drops": []
+      }
+    },
+    {
+      "name": "an already-canonical key passes through",
+      "in": { "$set": { "$email": "a@b.com" } },
+      "out": { "set": { "$email": "\"a@b.com\"" }, "setOnce": {}, "unset": [], "drops": [] }
+    },
+    {
+      "name": "an invented $ key is rejected, the namespace is reserved",
+      "in": { "$set": { "$invented": "x", "plan": "pro" } },
+      "out": {
+        "set": { "plan": "\"pro\"" }, "setOnce": {}, "unset": [],
+        "drops": [{ "key": "$invented", "code": "reserved_key" }]
+      }
+    },
+    {
+      "name": "an oversize value is dropped, never truncated, and its sibling survives",
+      "in": { "$set": { "bio": "<<256 x>>", "plan": "pro" } },
+      "out": {
+        "set": { "plan": "\"pro\"" }, "setOnce": {}, "unset": [],
+        "drops": [{ "key": "bio", "code": "value_too_large" }]
+      }
+    },
+    {
+      "name": "exactly at the byte cap is kept",
+      "in": { "$set": { "bio": "<<255 x>>" } },
+      "out": { "set": { "bio": "<<255 x quoted>>" }, "setOnce": {}, "unset": [], "drops": [] }
+    },
+    {
+      "name": "non-scalars are not storable",
+      "in": { "$set": { "a": [1, 2], "b": { "n": 1 }, "c": null } },
+      "out": {
+        "set": {}, "setOnce": {}, "unset": [],
+        "drops": [
+          { "key": "a", "code": "invalid_type" },
+          { "key": "b", "code": "invalid_type" },
+          { "key": "c", "code": "invalid_type" }
+        ]
+      }
+    },
+    {
+      "name": "$set beats $set_once on the same key, and the loser is reported",
+      "in": { "$set": { "plan": "pro" }, "$set_once": { "plan": "free" } },
+      "out": {
+        "set": { "plan": "\"pro\"" }, "setOnce": {}, "unset": [],
+        "drops": [{ "key": "plan", "code": "conflicting_op" }]
+      }
+    },
+    {
+      "name": "an unset colliding with a write is reported",
+      "in": { "$set": { "plan": "pro" }, "$unset": ["plan"] },
+      "out": {
+        "set": { "plan": "\"pro\"" }, "setOnce": {}, "unset": [],
+        "drops": [{ "key": "plan", "code": "conflicting_op" }]
+      }
+    },
+    {
+      "name": "non-colliding ops all survive",
+      "in": {
+        "$set": { "plan": "pro" },
+        "$set_once": { "created": "2026-08-01" },
+        "$unset": ["trial_ends_at"]
+      },
+      "out": {
+        "set": { "plan": "\"pro\"" },
+        "setOnce": { "$created": "\"2026-08-01\"" },
+        "unset": ["trial_ends_at"],
+        "drops": []
+      }
+    },
+    {
+      "name": "unset accepts only non-empty strings",
+      "in": { "$unset": ["plan", "", 7, "seats"] },
+      "out": {
+        "set": {}, "setOnce": {}, "unset": ["plan", "seats"],
+        "drops": [{ "key": "", "code": "invalid_type" }, { "key": "", "code": "invalid_type" }]
+      }
+    },
+    {
+      "name": "malformed input yields nothing rather than throwing",
+      "in": { "$set": null, "$set_once": "not-an-object", "$unset": 42 },
+      "out": { "set": {}, "setOnce": {}, "unset": [], "drops": [] }
+    }
+  ]
+}

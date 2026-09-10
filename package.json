@@ -1,0 +1,89 @@
+{
+  "name": "@vinktarhq/node",
+  "version": "0.1.0",
+  "description": "Vinktar for Node.js and edge runtimes: product analytics and error tracking with request-scoped identity.",
+  "keywords": [
+    "vinktar",
+    "analytics",
+    "error-tracking",
+    "monitoring",
+    "node",
+    "express",
+    "fastify",
+    "nestjs",
+    "edge"
+  ],
+  "homepage": "https://vinktar.com",
+  "bugs": {
+    "url": "https://github.com/vinktarhq/node/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vinktarhq/node.git"
+  },
+  "license": "MIT",
+  "author": "john.vink",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "edge-light": "./dist/edge.js",
+      "workerd": "./dist/edge.js",
+      "worker": "./dist/edge.js",
+      "browser": "./dist/edge.js",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./edge": {
+      "types": "./dist/edge.d.ts",
+      "import": "./dist/edge.js",
+      "require": "./dist/edge.cjs"
+    },
+    "./express": {
+      "types": "./dist/frameworks/express.d.ts",
+      "import": "./dist/frameworks/express.js",
+      "require": "./dist/frameworks/express.cjs"
+    },
+    "./fastify": {
+      "types": "./dist/frameworks/fastify.d.ts",
+      "import": "./dist/frameworks/fastify.js",
+      "require": "./dist/frameworks/fastify.cjs"
+    },
+    "./nest": {
+      "types": "./dist/frameworks/nest.d.ts",
+      "import": "./dist/frameworks/nest.js",
+      "require": "./dist/frameworks/nest.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup && node scripts/postbuild.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

@@ -1,0 +1,69 @@
+name: Publish
+
+# Publishing happens HERE and not from a laptop, and that is not a preference.
+#
+# There is no npm token. The registry is configured to trust THIS repository and THIS workflow
+# file, and GitHub hands the job a short-lived OIDC token that proves both, the same handshake
+# that signs the provenance attestation. Nothing long-lived exists to leak, rotate, or be blocked
+# by an account's two-factor policy.
+#
+# Changing the filename of this workflow breaks publishing until the trusted publisher on
+# npmjs.com is updated to match, because the name is half of what npm is trusting.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'npm dist-tag (use "next" for a prerelease)'
+        required: false
+        default: latest
+
+permissions:
+  contents: read
+  id-token: write # the OIDC token npm exchanges for publish rights; without it there is no auth at all
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm 11.5.1 or newer. Pinning the tool rather than inheriting
+      # whatever the runner image bundles keeps a runner update from quietly turning this back
+      # into "no token, no auth, no publish".
+      - run: npm install -g npm@latest
+
+      - run: npm ci
+
+      # A tag that disagrees with package.json publishes a version nobody asked for, under a name
+      # nobody will look for. npm would accept it happily, and the version can never be replaced.
+      - name: the tag and package.json must agree
+        if: github.event_name == 'release'
+        run: |
+          set -e
+          manifest=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$manifest" != "$tag" ]; then
+            echo "release tag v$tag does not match package.json $manifest" >&2
+            exit 1
+          fi
+          echo "publishing $manifest"
+
+      # `prepack` builds, `prepublishOnly` tests. Nothing is uploaded
+      # until they pass. No `env:` block: the OIDC token is exchanged by npm itself.
+      - run: npm publish --tag "${{ inputs.tag || 'latest' }}"
+
+      - name: prove it is installable
+        run: |
+          set -e
+          cd "$(mktemp -d)"
+          npm init -y > /dev/null
+          npm install "@vinktarhq/node@$(node -p "require('$GITHUB_WORKSPACE/package.json').version")"
+          node -e "const m=require('@vinktarhq/node'); if(typeof m.init!=='function') process.exit(1)"
