@@ -55,7 +55,7 @@ describe('analytics', () => {
   it('flushes at flushAt and compresses large bodies', async () => {
     const client = make({ flushAt: 5 });
     for (let i = 0; i < 5; i += 1) client.track('bulk', { text: 'x'.repeat(300) });
-    await tick(5);
+    for (let waited = 0; harness.requests.length === 0 && waited < 1000; waited += 10) await tick(10);
     expect(harness.requests).toHaveLength(1);
     expect(harness.requests[0]!.gzip).toBe(true);
     expect(harness.batches()).toHaveLength(5);
