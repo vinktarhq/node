@@ -121,13 +121,16 @@ describe('scopes', () => {
     expect(client.scope().userId).toBeUndefined();
   });
 
-  it('reset() returns the scope to the initial one', () => {
+  it('reset() keeps the configured tags and never restores a configured identity', () => {
     const client = make({ initialScope: { tags: { service: 'api' }, userId: 'system' } });
+    expect(client.scope().userId).toBe('system');
     client.setTag('extra', 'x');
     client.setUser({ id: 'bob' });
+    client.register({ plan: 'pro' });
     client.reset();
     expect(client.scope().tags).toEqual({ service: 'api' });
-    expect(client.scope().userId).toBe('system');
+    expect(client.scope().userId).toBeUndefined();
+    expect(client.scope().properties).toEqual({});
   });
 
   it('enterScope() binds the rest of the async context', async () => {
@@ -210,5 +213,27 @@ describe('transport policy', () => {
     harness.respond(503, { error: 'storage_unavailable' }, { 'Retry-After': '30' });
     client.track('stuck');
     expect(await client.close()).toBe(false);
+  });
+});
+
+describe('request scopes', () => {
+  it('carry what was set for the process at startup, and never its actor', async () => {
+    const client = make({ initialScope: { userId: 'startup-user' } });
+    client.setTag('service', 'api');
+    client.register({ version: '1.2.3' });
+
+    await client.withScope(async () => {
+      client.enterScope();
+      client.track('in a request');
+      client.captureMessage('in a request');
+    });
+    await client.flush();
+
+    const [event] = harness.batches();
+    const [error] = harness.errors();
+    expect(event!['payload']).toMatchObject({ version: '1.2.3' });
+    expect(event!['user_id']).toBeUndefined();
+    expect(error!['tags']).toEqual({ service: 'api' });
+    expect(error!['user_id']).toBeUndefined();
   });
 });

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -62,14 +62,29 @@ describe('spool', () => {
   const dir = mkdtempSync(join(tmpdir(), 'vk-spool-'));
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it('writes atomically and restores once', () => {
+  it('writes atomically, privately, and restores once without deleting until rewritten', () => {
     const path = join(dir, 'nested', 'spool.json');
-    const spool = new Spool(path, { ...fs, dirname }, 1, logger);
+    const spool = new Spool(path, { ...fs, dirname }, 1, logger, 'project-a');
     spool.write([{ category: 'event', item: { name: 'a' } }]);
-    expect(JSON.parse(readFileSync(path, 'utf8'))).toHaveLength(1);
-    const again = new Spool(path, { ...fs, dirname }, 2, logger);
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ v: 1, owner: 'project-a', entries: [{ category: 'event', item: { name: 'a' } }] });
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+
+    const again = new Spool(path, { ...fs, dirname }, 2, logger, 'project-a');
     expect(again.restore()).toEqual([{ category: 'event', item: { name: 'a' } }]);
     expect(again.restore()).toEqual([]);
+    // A crash here must not lose what was restored.
+    expect(existsSync(path)).toBe(true);
+    again.write([]);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('leaves another project\'s spool alone, and never deletes a file it does not own', () => {
+    const path = join(dir, 'shared.json');
+    new Spool(path, { ...fs, dirname }, 1, logger, 'project-a').write([{ category: 'error', item: { event_id: 'x' } }]);
+    const other = new Spool(path, { ...fs, dirname }, 2, logger, 'project-b');
+    expect(other.restore()).toEqual([]);
+    other.write([]);
+    expect(existsSync(path)).toBe(true);
   });
 });
 

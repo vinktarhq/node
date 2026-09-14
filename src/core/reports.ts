@@ -7,16 +7,12 @@
  * worth having. `commit()` SUBTRACTS what was delivered, so outcomes recorded while a request was
  * in flight are neither lost nor double-counted.
  */
-export type DropReason =
-  | 'queue_overflow'
-  | 'sample_rate'
-  | 'event_processor'
-  | 'before_send'
-  | 'send_error'
-  | 'ratelimit'
-  | 'invalid';
+export const DROP_REASONS = ['queue_overflow', 'sample_rate', 'event_processor', 'before_send', 'send_error', 'ratelimit', 'invalid', 'deduplicated'] as const;
+export type DropReason = (typeof DROP_REASONS)[number];
 
-export type Category = 'event' | 'identify' | 'error';
+export const CATEGORIES = ['event', 'identify', 'error'] as const;
+
+export type Category = (typeof CATEGORIES)[number];
 
 export interface ClientReport {
   discarded: Array<{ reason: string; category: string; quantity: number }>;
@@ -49,7 +45,10 @@ export class Reports {
     return { body: { discarded }, taken: new Map(this.counts) };
   }
 
-  /** Only when the batch is genuinely gone: delivered, or permanently rejected. */
+  /**
+   * Only when the request carrying the snapshot was ACCEPTED. A body the server refused took the
+   * report with it, so the counts stay for the next request.
+   */
   commit(taken: Map<string, number>): void {
     for (const [key, quantity] of taken) {
       const remaining = (this.counts.get(key) ?? 0) - quantity;

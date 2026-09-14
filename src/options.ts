@@ -2,6 +2,7 @@ import { toHookList } from './core/hooks.js';
 import { MAX_DEPTH, MAX_STRING_BYTES } from './core/limits.js';
 import { consoleSink, Logger, type LogSink } from './core/logger.js';
 import type { Props } from './core/normalize.js';
+import type { AsyncLocalStorageLike } from './node/scope.js';
 import type { CrumbHook, EventHook } from './types.js';
 
 /**
@@ -32,8 +33,17 @@ export interface VinktarOptions {
   /** Names the service on every error. Defaults to the hostname. */
   serverName?: string;
 
-  /** Seeded on the root scope and re-applied by `reset()`. */
+  /**
+   * Tags and context for every scope, applied again by `reset()`. An identity given here is set on
+   * the root scope once, for work outside any request; fresh request scopes and `reset()` never
+   * inherit it.
+   */
   initialScope?: { userId?: string; deviceId?: string; sessionId?: string; tags?: Record<string, string>; context?: Props };
+  /**
+   * The `AsyncLocalStorage` class, for a runtime that has one but does not expose it globally
+   * (Cloudflare Workers: `import { AsyncLocalStorage } from 'node:async_hooks'`).
+   */
+  asyncLocalStorage?: new () => AsyncLocalStorageLike;
 
   flushAt?: number;
   flushIntervalMs?: number;
@@ -46,6 +56,11 @@ export interface VinktarOptions {
   spoolPath?: string;
   /** Flush on `beforeExit`. */
   autoFlush?: boolean;
+  /**
+   * Close on SIGTERM/SIGINT, then re-raise the signal when nothing else is listening. Turn off when
+   * the application runs its own shutdown sequence and calls `close()` from it.
+   */
+  handleSignals?: boolean;
 
   /** Install process-wide handlers for uncaught exceptions and unhandled rejections. */
   captureErrors?: boolean;
@@ -106,6 +121,7 @@ export interface Resolved {
   readonly shutdownTimeout: number;
   readonly spoolPath: string;
   readonly autoFlush: boolean;
+  readonly handleSignals: boolean;
   readonly captureErrors: boolean;
   readonly unhandledRejections: 'auto' | 'none';
   readonly breadcrumbs: { console: boolean; http: boolean };
@@ -131,6 +147,7 @@ export interface Resolved {
   readonly beforeBreadcrumb: readonly CrumbHook[];
   readonly onError: ((error: Error) => void) | undefined;
   readonly fetch: typeof fetch | undefined;
+  readonly asyncLocalStorage: (new () => AsyncLocalStorageLike) | undefined;
   /** Why the SDK will not send, when it will not. */
   readonly inert: string | null;
   readonly warnings: readonly string[];
@@ -148,11 +165,11 @@ export interface Environment {
 const KNOWN = new Set<keyof VinktarOptions>([
   'writeKey', 'key', 'host', 'enabled', 'debug', 'analytics', 'errors', 'release', 'environment', 'enabledEnvironments',
   'serverName', 'initialScope', 'flushAt', 'flushIntervalMs', 'maxQueueSize', 'requestTimeoutMs', 'gzip', 'shutdownTimeout',
-  'spoolPath', 'autoFlush', 'captureErrors', 'unhandledRejections', 'breadcrumbs', 'maxBreadcrumbs', 'sampleRate',
+  'spoolPath', 'autoFlush', 'handleSignals', 'captureErrors', 'unhandledRejections', 'breadcrumbs', 'maxBreadcrumbs', 'sampleRate',
   'errorSampleRate', 'maxErrorsPerMinute', 'maxEventsPerMinute', 'dedupe', 'ignoreErrors', 'superProperties',
   'sendDefaultPii', 'redactedKeys', 'propertyDenylist', 'maxValueBytes', 'normalizeDepth', 'includeRawStack',
   'attachStacktrace', 'projectRoot', 'contextLines', 'beforeSend', 'beforeTrack', 'beforeBreadcrumb', 'onError', 'logger',
-  'fetch',
+  'fetch', 'asyncLocalStorage',
 ]);
 
 export function makeLogger(options: VinktarOptions): Logger {
@@ -202,16 +219,18 @@ export function resolve(options: VinktarOptions, environment: Environment, logge
     toHookList(value as never, (index) => warn(`${name}[${index}] is not a function and was dropped`)) as T[];
   const text = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value.trim() : fallback);
 
+  const enabled = options.enabled ?? true;
   const writeKey = text(options.writeKey ?? options.key ?? environment.env('VINKTAR_KEY'));
-  if (writeKey === '') {
+  // A client switched off on purpose needs no key; one that is meant to send and has none is a
+  // deployment mistake, said once at startup where someone is looking.
+  if (writeKey === '' && enabled) {
     throw new TypeError('[vinktar] no write key: pass { writeKey } to init() or set VINKTAR_KEY');
   }
-  if (!writeKey.startsWith('vnk_pk_') && !writeKey.startsWith('vnk_sk_')) {
+  if (writeKey !== '' && !writeKey.startsWith('vnk_pk_') && !writeKey.startsWith('vnk_sk_')) {
     warn('the write key does not look like a Vinktar key (vnk_pk_… or vnk_sk_…)');
   }
 
   let inert: string | null = null;
-  const enabled = options.enabled ?? true;
   if (!enabled) inert = 'enabled is false';
 
   const environmentName = text(options.environment) || text(environment.env('VINKTAR_ENVIRONMENT')) || text(environment.env('NODE_ENV')) || 'production';
@@ -255,6 +274,7 @@ export function resolve(options: VinktarOptions, environment: Environment, logge
     shutdownTimeout: clamp('shutdownTimeout', options.shutdownTimeout, 100, 60_000, 2_000),
     spoolPath: text(options.spoolPath),
     autoFlush: options.autoFlush ?? true,
+    handleSignals: options.handleSignals ?? true,
     captureErrors: options.captureErrors ?? false,
     unhandledRejections: options.unhandledRejections === 'none' ? 'none' : 'auto',
     breadcrumbs: typeof crumbs === 'object' ? { console: crumbs.console ?? true, http: crumbs.http ?? true } : { console: crumbs, http: crumbs },
@@ -280,6 +300,7 @@ export function resolve(options: VinktarOptions, environment: Environment, logge
     beforeBreadcrumb: hooks('beforeBreadcrumb', options.beforeBreadcrumb),
     onError: typeof options.onError === 'function' ? options.onError : undefined,
     fetch: typeof options.fetch === 'function' ? options.fetch : undefined,
+    asyncLocalStorage: typeof options.asyncLocalStorage === 'function' ? options.asyncLocalStorage : undefined,
     inert,
     warnings,
   };

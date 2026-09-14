@@ -67,6 +67,23 @@
     "exceptionOrder": "thrown-first",
     "columnBase": 0
   },
+  "reports": {
+    "reasons": [
+      "queue_overflow",
+      "sample_rate",
+      "event_processor",
+      "before_send",
+      "send_error",
+      "ratelimit",
+      "invalid",
+      "deduplicated"
+    ],
+    "categories": [
+      "event",
+      "identify",
+      "error"
+    ]
+  },
   "sourcemaps": {
     "maxFileBytes": 20971520,
     "maxRequestBytes": 62914560,

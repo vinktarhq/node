@@ -13,7 +13,9 @@ const FACADE = [
   'captureException',
   'captureMessage',
   'close',
+  'enterScope',
   'flush',
+  'flushIfServerless',
   'getClient',
   'identify',
   'init',
@@ -37,7 +39,7 @@ const FACADE = [
   'withScope',
 ];
 
-const CLIENT = [...FACADE.filter((name) => !['init', 'getClient'].includes(name)), 'enterScope', 'flushIfServerless'];
+const CLIENT = FACADE.filter((name) => !['init', 'getClient'].includes(name));
 
 const functions = (module: Record<string, unknown>): string[] =>
   Object.keys(module)
@@ -50,8 +52,8 @@ describe('the public API surface', () => {
     expect(functions(facade as Record<string, unknown>)).toEqual(FACADE);
   });
 
-  it('exports the same surface from the edge entry, plus the waitUntil helper', () => {
-    expect(functions(edge as Record<string, unknown>)).toEqual([...FACADE, 'flushIfServerless'].sort());
+  it('exports the same surface from the edge entry', () => {
+    expect(functions(edge as Record<string, unknown>)).toEqual(FACADE);
   });
 
   it('carries every documented method on the class too', () => {

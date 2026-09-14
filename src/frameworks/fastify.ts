@@ -28,7 +28,14 @@ interface FastifyReply {
   elapsedTime?: number;
 }
 
-export function vinktarFastify(app: FastifyLike, options: FastifyOptions = {}, done?: () => void): void {
+/**
+ * The first parameter is typed loosely on purpose: Fastify's own instance type is far richer than
+ * the three hooks used here, and a narrower structural type would make `app.register(vinktarFastify)`
+ * fail to compile against the real one.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function vinktarFastify(instance: any, options: FastifyOptions = {}, done?: (error?: Error) => void): void {
+  const app = instance as FastifyLike;
   const minimum = options.minimumStatus ?? 500;
   const started = new WeakMap<object, number>();
 

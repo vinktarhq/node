@@ -1,17 +1,20 @@
+import type { Category } from './reports.js';
+
 /**
  * HTTP response → what to do about it.
  *
  * A pure function, so the whole transport policy is testable without a socket and identical in
- * every runtime. `spec/fixtures/responses.json` is the table, and three of its rows lose data when
- * wrong: 202 means durably stored (drop the batch), 503 means NOT stored (keep it), and 429 is
- * never retried inline (hold the categories, drain later).
+ * every runtime. `spec/fixtures/responses.json` is the table, and four of its rows lose data when
+ * wrong: any 2xx means accepted (drop the batch), 503 means NOT stored (keep it), 429 is never
+ * retried inline (hold the categories, drain later), and a redirect is never followed (it would
+ * carry the write key and the body to wherever it points).
  *
  * The decision is driven by the response BODY first: the error code says *why*, where a header
  * only says *how long*. `Retry-After` and `X-RateLimit-Categories` are read when present and
  * refine the wait and the scope of a hold; the policy never depends on them being there.
  */
 export type Action =
-  /** Durably queued, or permanently rejected. Either way, forget it. */
+  /** Accepted, or permanently refused. Either way, forget it. */
   | 'drop'
   /** Keep it and try again later. */
   | 'retry'
@@ -30,14 +33,19 @@ export interface Decision {
   readonly wait: number;
   /** Set when action is `degrade`. */
   readonly degrade?: 'disableGzip';
+  /** `ok` for an acceptance, `redirect` for a 3xx, otherwise the server's code. */
   readonly code: string;
   /** For `hold`: the categories named by the server, when it named any. */
   readonly categories?: readonly string[];
-  /** A monthly cap: hold for hours and tell the developer, do not sleep on the header. */
+  /** A monthly cap: surfaced to the developer once. */
   readonly billing?: boolean;
 }
 
-/** Retrying before the month rolls over cannot succeed, so it gets hours rather than seconds. */
+/**
+ * The longest a monthly cap is held at a time. The server's `Retry-After` points at the next
+ * month; sleeping that long would also sleep through a plan upgrade, and one refused request every
+ * six hours costs nothing.
+ */
 export const MONTHLY_HOLD_SECONDS = 21_600;
 
 export interface ResponseHeaders {
@@ -55,7 +63,13 @@ export function decide(status: number, body: unknown, headers: ResponseHeaders =
   // An SDK that reads only `error` sees an empty code and mishandles its own bad gzip.
   const code = String(payload['error'] ?? payload['message'] ?? '') || `http_${status}`;
 
-  if (status === 202) return { action: 'drop', wait: 0, code: 'ok' };
+  // Ingest answers 202. A proxy in front of it may answer 200 or 204, and resending what was
+  // accepted counts it twice.
+  if (status >= 200 && status < 300) return { action: 'drop', wait: 0, code: 'ok' };
+
+  // Following a redirect re-sends the body and the write key to another location. The host is
+  // misconfigured; nothing sent to it will ever land where it should.
+  if (status >= 300 && status < 400) return { action: 'shutdown', wait: 0, code: 'redirect' };
 
   if (status === 400) {
     // Our own compression produced something the server could not inflate. Retrying in the clear
@@ -75,10 +89,13 @@ export function decide(status: number, body: unknown, headers: ResponseHeaders =
   if (status === 429) {
     const billing = code === 'monthly_cap_exceeded' || code === 'monthly_error_cap_exceeded';
     const named = parseRateLimitCategories(headers.rateLimitCategories);
+    // A category header without its seconds part is not a zero wait.
+    const serverWait = named !== null && named.seconds > 0 ? named.seconds : retryAfter;
+    const wait = billing ? (serverWait > 0 ? Math.min(serverWait, MONTHLY_HOLD_SECONDS) : MONTHLY_HOLD_SECONDS) : serverWait;
 
     return {
       action: 'hold',
-      wait: billing ? MONTHLY_HOLD_SECONDS : Math.max(0, named?.seconds ?? retryAfter),
+      wait,
       code,
       billing,
       ...(named !== null && named.categories.length > 0 ? { categories: named.categories } : {}),
@@ -100,6 +117,18 @@ export function networkFailure(): Decision {
 }
 
 /**
+ * The categories a hold actually covers. It starts from what the endpoint governs; the server may
+ * narrow that to the categories it names, and never widen it. A header naming nothing the endpoint
+ * governs is ignored rather than trusted: a batch response must not pause error reporting.
+ */
+export function holdCategories(endpoint: readonly Category[], named: readonly string[] | undefined): Category[] {
+  if (named === undefined || named.length === 0) return [...endpoint];
+  const narrowed = endpoint.filter((category) => named.includes(category));
+
+  return narrowed.length > 0 ? narrowed : [...endpoint];
+}
+
+/**
  * `Retry-After` is either delta-seconds or an HTTP-date. Both are legal, and a server behind a
  * CDN can produce either. Anything unparseable is 0 (use the local schedule).
  */
@@ -114,11 +143,11 @@ export function parseRetryAfter(header: string | null | undefined, now: number =
   return 0;
 }
 
-/** `X-RateLimit-Categories: <seconds>:<cat>;<cat>` */
+/** `X-RateLimit-Categories: <seconds>:<cat>;<cat>`. A missing or bad seconds part is 0. */
 export function parseRateLimitCategories(header: string | null | undefined): { seconds: number; categories: string[] } | null {
   if (header === null || header === undefined || header.trim() === '') return null;
   const [rawSeconds = '', rawCategories = ''] = header.split(':', 2);
-  const seconds = Number(rawSeconds);
+  const seconds = rawSeconds.trim() === '' ? 0 : Number(rawSeconds);
 
   return {
     seconds: Number.isFinite(seconds) ? Math.max(0, seconds) : 0,

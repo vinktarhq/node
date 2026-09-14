@@ -8,14 +8,19 @@ import type { Category } from './reports.js';
  * is what stops a throttled analytics batch from stalling a crash report; they are separate
  * products with separate budgets.
  *
- * Two schedules, because two failures look alike and are not:
+ * Two kinds of wait, because two answers look alike and are not:
  *
- *   - A server answer (429, 503, 5xx) gets exponential backoff with ±50% jitter, capped at thirty
- *     minutes. Without jitter every tab that failed at the same instant retries at the same
- *     instant, which is how a recovering server gets knocked over again.
- *   - A request that never got an answer at all (status 0) is, on a real page, almost always an ad
- *     blocker or an offline device, and neither is fixed by trying harder. It gets a short budget
- *     of attempts and then the batch is let go and counted as a `send_error`.
+ *   - A **hold** (429) waits exactly as long as the server said, or on the local schedule when it
+ *     said nothing. The server knows its own bucket.
+ *   - A **retry** (503, 5xx, no answer) treats the server's wait as a floor under an exponential
+ *     schedule with ±50% jitter, capped at thirty minutes. Ten fixed ten-second retries would give
+ *     up on a storage outage in under two minutes; this schedule keeps a batch for about half an hour.
+ *     Without jitter every tab that failed at the same instant retries at the same instant, which
+ *     is how a recovering server gets knocked over again.
+ *
+ * A request that never got an answer at all is, on a real page, usually an ad blocker, and that
+ * is not fixed by trying harder: it gets a short budget. A runtime that knows it is offline says
+ * so, and those attempts are not counted (see the dispatcher).
  */
 export const BATCH_CATEGORIES: readonly Category[] = ['event', 'identify'];
 export const ERROR_CATEGORIES: readonly Category[] = ['error'];
@@ -24,6 +29,8 @@ export const MAX_ATTEMPTS = 10;
 export const MAX_NETWORK_ATTEMPTS = 3;
 const BASE_MS = 3_000;
 const CAP_MS = 30 * 60_000;
+/** The longest any server-supplied wait is honoured for. */
+const SERVER_CAP_MS = 6 * 3_600_000;
 
 export class Backoff {
   private readonly until = new Map<Category, number>();
@@ -49,15 +56,20 @@ export class Backoff {
     return Math.max(0, max);
   }
 
-  /** @param seconds the server's wait when it gave one; 0 to use the local schedule. */
-  hold(categories: readonly Category[], seconds = 0): void {
+  /**
+   * @param seconds the server's wait when it gave one; 0 to use the local schedule.
+   * @param mode `exact` honours the server's wait as given; `floor` never waits less than the
+   *             local schedule either.
+   */
+  hold(categories: readonly Category[], seconds = 0, mode: 'exact' | 'floor' = 'exact'): void {
     const now = this.now();
 
     for (const category of categories) {
       const strikes = (this.strikes.get(category) ?? 0) + 1;
       this.strikes.set(category, strikes);
 
-      const wait = seconds > 0 ? Math.min(seconds * 1000, CAP_MS * 12) : this.schedule(strikes);
+      const server = seconds > 0 ? Math.min(seconds * 1000, SERVER_CAP_MS) : 0;
+      const wait = mode === 'floor' ? Math.max(server, this.schedule(strikes)) : server > 0 ? server : this.schedule(strikes);
       this.until.set(category, Math.max(this.until.get(category) ?? 0, now + wait));
     }
   }

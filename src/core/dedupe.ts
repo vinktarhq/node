@@ -3,9 +3,10 @@
  *
  * Three guards, because they catch different failures:
  *
- *   - **Dedupe** removes the *same* error repeating. A bounded LRU, not a single last-seen slot:
- *     two errors alternating defeat a single slot entirely, and that is exactly what a render loop
- *     produces.
+ *   - **Dedupe** removes the *same* error repeating within a few seconds. A bounded map, not a
+ *     single last-seen slot: two errors alternating defeat a single slot entirely, and that is
+ *     exactly what a render loop produces. What counts as "the same" is the caller's key, so a
+ *     server runtime can keep two users' identical failures apart. Every suppression is counted.
  *   - **The valve** caps the *rate* of everything. Dedupe cannot help when every error is
  *     genuinely different, and the server has a per-minute valve of its own; an unbounded client
  *     earns a 429 and loses the interesting errors along with the noise.
@@ -21,18 +22,21 @@ export class Dedupe {
     private readonly now: () => number = Date.now,
   ) {}
 
-  /** True when this is a repeat and should not be sent. */
+  /**
+   * True when this is a repeat and should not be sent.
+   *
+   * The window is FIXED from the first sighting. A repeat does not extend it: if it did, an error
+   * recurring every few seconds would refresh its own window forever and never be reported again,
+   * which hides exactly the failure that is still happening.
+   */
   isDuplicate(key: string): boolean {
     const at = this.seen.get(key);
     const now = this.now();
 
-    if (at !== undefined && now - at < this.windowMs) {
-      this.seen.delete(key);
-      this.seen.set(key, now);
+    if (at !== undefined && now - at < this.windowMs) return true;
 
-      return true;
-    }
-
+    // Re-inserted, so a key seen again after its window expired is the newest, not the next evicted.
+    this.seen.delete(key);
     this.seen.set(key, now);
     while (this.seen.size > this.size) {
       const oldest = this.seen.keys().next().value;
