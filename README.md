@@ -10,8 +10,9 @@ request that is being served.
 
 Events and errors from a server carry the user, device and session of the visitor they were
 served for, so a backend error sits next to the browser events that led to it in
-[Vinktar](https://vinktar.com). Requests get their own scope; nothing from one request leaks into
-another.
+[Vinktar](https://vinktar.com). Every request gets a scope of its own, and so does every client:
+nothing one request or job sets reaches another, and nothing one client sets reaches another
+client's project.
 
 ```ts
 import { init, track, captureException } from '@vinktarhq/node';
@@ -57,7 +58,7 @@ throws into your code.** Everything the SDK cannot send is said out loud in the 
 A server can use either the project's write key (`vnk_pk_…`) or a secret key (`vnk_sk_…`); both
 can append events. Keys are created in the project settings. Without a key, `init()` throws:
 a server with no key is misconfigured, and that belongs in the first deploy's logs rather than in a
-dashboard weeks later.
+dashboard weeks later. The one exception is `enabled: false`, which needs no key and does nothing.
 
 ## Analytics
 
@@ -66,11 +67,18 @@ track('order_created', { total: 42 });
 track('imported', { rows: 1200 }, { userId: 'user_42', timestamp: row.createdAt });
 page('/pricing');                     // a server-rendered route is a pageview
 identify('user_42', { email: 'ada@example.com', plan: 'pro' }, { signed_up: '2026-01-15' });
-register({ region: 'eu-west' });      // on every event from this process
+register({ plan: 'pro' });            // on this scope's events: this request or job only
 ```
 
+`register()` adds properties to the current scope's analytics events. Inside a request or a job
+they stay there; called at startup, outside any request, they apply to every request that follows.
+For values that belong to the whole service, `superProperties` in `init()` says so explicitly.
+Registered properties go on events, not on errors; error context is `setContext()`.
+
 The third argument to `track` and `page` names the person when the call site knows better than
-the scope, and takes a `timestamp` for events that happened earlier (an import, a queue job).
+the scope, and takes a `timestamp` for events that happened earlier (an import, a queue job). An id
+given there applies to that call only. One that is not usable (blank, a placeholder such as
+`guest`, or too long) refuses the event with a warning rather than sending it as the scope's user.
 Timestamps outside the window the server accepts, seven days back and an hour ahead, are refused
 with a warning rather than sent to be rejected.
 
@@ -80,9 +88,10 @@ canonical `$`-prefixed names; spell them either way.
 
 ## Scopes and identity
 
-A **scope** holds the user, device, session, tags, context, the request and the breadcrumb trail
-for one unit of work. On Node it lives in `AsyncLocalStorage`, so everything that runs within a
-request, however deep and however asynchronous, sees that request's scope.
+A **scope** holds the user, device, session, tags, context, registered properties, the request and
+the breadcrumb trail for one unit of work. On Node it lives in an `AsyncLocalStorage` that belongs
+to that client, so everything that runs within a request, however deep and however asynchronous,
+sees that request's scope, and a second client in the same process never sees it at all.
 
 ```ts
 withScope(async (scope) => {
@@ -93,13 +102,22 @@ withScope(async (scope) => {
 
 scope().setContext({ tenant: 'acme' });
 setUser({ id: 'user_42', plan: 'pro' });
-reset();                             // back to the initial scope
+setUser(null);                       // the user only; see below
+reset();                             // everything on this scope
 ```
 
-`withScope` forks the current scope for the callback and the promise it returns; changes inside
-stay inside. Framework adapters do this per request. `enterScope()` is for frameworks whose hooks
-return rather than wrap the handler; it binds a fresh scope to the rest of the current async
-context.
+`withScope` forks the current scope for the callback and the promise it returns: changes inside
+stay inside, it returns what the callback returns, and an exception thrown inside comes straight
+back out, unreported. `enterScope()` starts a **fresh** scope for the rest of the current async
+context, for frameworks whose hooks return rather than wrap the handler. A fresh scope carries the
+tags, context and properties set for the whole process, and never a user, device, session, request
+or breadcrumbs from anything that ran before. The framework adapters start one per request.
+
+`setUser(null)` clears the user and nothing else. A device adopted from the browser stays, and the
+server resolves events carrying a device it has linked to a user back to that user, so clearing the
+user does not make later events anonymous. To forget an actor, give the work a fresh scope, or call
+`reset()`, which clears the whole scope, registered properties included, and puts back only the
+configured tags and context: an identity in `initialScope` is never restored.
 
 **Stitching to the browser.** The browser SDK can stamp `X-Vinktar-Device-Id` and
 `X-Vinktar-Session-Id` on requests to your own origin (`propagateIdentity`). `scopeFromHeaders`
@@ -125,8 +143,9 @@ the error, flushes within `shutdownTimeout`, and then reproduces Node's default 
 but **only if it is the only listener**: if you registered your own `uncaughtException` handler,
 the process is yours and the SDK only observes. Worker threads never exit the process from here.
 Unhandled rejections are hooked only in Node's `warn` and `none` modes; under the default `throw`
-they already reach the exception handler, and `strict` and `warn-with-error-code` are left to the
-operator.
+they already reach the exception handler and are reported as rejections, and `strict` and
+`warn-with-error-code` are left to the operator. Several clients in one process share one set of
+listeners, so a crash exits once, after every client has flushed.
 
 Errors carry the cause chain, parsed frames with in-app frames marked and made relative to
 `projectRoot`, five lines of source around each in-app frame nearest the crash (read from disk,
@@ -135,8 +154,9 @@ cookies or authorization), the scope's user, tags, context and breadcrumbs, and 
 server name. Breadcrumbs come from console output and outbound `fetch` calls (method, URL, status,
 duration; never a body or a header).
 
-Repeats within five seconds are dropped, `ignoreErrors` is honoured, and a per-minute valve (100
-by default) stops a loop from spending the quota. Secret-shaped values are scrubbed from messages
+The same error for the same user within five seconds is sent once and the repeats are counted;
+two users hitting one bug are two occurrences. `ignoreErrors` is honoured, and per-minute valves
+(100 in all, half that per error type, by default) stop a loop from spending the quota. Secret-shaped values are scrubbed from messages
 and source lines before they leave the process.
 
 Source maps: `@vinktarhq/cli` uploads them and stamps bundles with debug ids that the server
@@ -170,11 +190,19 @@ app.register(vinktarFastify, { trackRequests: true });
 ### NestJS
 
 ```ts
+import { HttpAdapterHost } from '@nestjs/core';
 import { VinktarMiddleware, VinktarExceptionFilter } from '@vinktarhq/node/nest';
 
+const { httpAdapter } = app.get(HttpAdapterHost);
 app.use(new VinktarMiddleware().use);
-app.useGlobalFilters(new VinktarExceptionFilter());   // reports, then rethrows for Nest's own filters
+app.useGlobalFilters(new VinktarExceptionFilter({ httpAdapter }));
 ```
+
+The filter reports the error and then answers exactly as Nest's own filter would: an
+`HttpException`'s response, or `{ statusCode: 500, message: 'Internal server error' }`. It cannot
+hand the error on by rethrowing it, because Nest does not pass a rethrown exception to its default
+filter. If you already have a filter extending `BaseExceptionFilter`, call
+`captureNestException(exception, host)` from its `catch` instead.
 
 An error is reported once even when it passes through several layers.
 
@@ -194,6 +222,15 @@ export default {
 };
 ```
 
+On Cloudflare Workers, pass `AsyncLocalStorage` in, or concurrent requests share one scope (the
+SDK says so the first time it sees them overlap):
+
+```ts
+import { AsyncLocalStorage } from 'node:async_hooks';   // with the nodejs_als or nodejs_compat flag
+
+init({ writeKey: env.VINKTAR_KEY, asyncLocalStorage: AsyncLocalStorage });
+```
+
 The `edge` entry imports no `node:` modules and is what bundlers select under the `edge-light`,
 `workerd` and `worker` conditions (Vercel Edge, Cloudflare, Next.js middleware). On it,
 **nothing is sent until asked**: a request the runtime finds running after the handler returned is
@@ -208,16 +245,27 @@ handler.
 ## Shutting down
 
 ```ts
-await close();   // once, before the process exits
+const delivered = await flush();   // true when everything queued was accepted
+await close();                     // once, before the process exits
 ```
 
-`close()` flushes what it can within `shutdownTimeout` (2 s), gives up on a queue that cannot
-drain instead of spinning, and tears every patch down. `flush()` is the per-request call. On
-Node the SDK also flushes on `beforeExit`, and on `SIGTERM`/`SIGINT` closes and then re-raises the
-signal if it was the only listener, so the exit code stays what the platform expects. Timers are
-unreferenced, so a script is never kept alive by a pending flush.
+`flush()` resolves `true` only when everything queued when it was called was accepted by the
+server. A batch waiting out a rate limit, retrying after a failure, or refused (in whole, or one
+record inside an accepted batch) resolves `false`; the SDK keeps retrying on its own. Unlike some
+SDKs, `true` does not just mean "nothing is in flight any more". A `false` is about telemetry, not
+your application: never retry your own work because of it.
 
-`spoolPath` keeps what could not be sent in a file that the next process replays.
+`close()` refuses new work at once, delivers what it can within `shutdownTimeout` (2 s), and tears
+every patch down. Every call, including one made while the first is still running, resolves with
+the same answer. On Node the SDK also flushes on `beforeExit`, and on `SIGTERM`/`SIGINT` closes and
+then re-raises the signal if nothing else is listening, so the exit code stays what the platform
+expects. An application with its own shutdown sequence sets `handleSignals: false` and calls
+`close()` from it. Timers are unreferenced, so a script is never kept alive by a pending flush.
+
+`spoolPath` keeps what could not be delivered in a file the next process sends. It is best effort:
+nothing is written when a process is killed outright, and delivery after a restore is at least once
+(the server deduplicates on the event id). The file is private (0600), records which write key wrote
+it, and belongs to one process: give each process its own path.
 
 ## Options
 
@@ -231,21 +279,22 @@ unreferenced, so a script is never kept alive by a pending flush.
 | `environment` | `$VINKTAR_ENVIRONMENT`, `$NODE_ENV`, `production` | |
 | `enabledEnvironments` | `[]` | Send only from these. |
 | `serverName` | hostname | Names the service on every error. |
-| `initialScope` | `{}` | `{ userId, deviceId, sessionId, tags, context }`, seeded on the root scope and restored by `reset()`. |
+| `initialScope` | `{}` | `{ tags, context }` for every scope, and put back by `reset()`. An identity given here applies only outside any request and is never restored. |
 | `flushAt` / `flushIntervalMs` | `20` / `10000` | |
 | `maxQueueSize` | `1000` | Oldest dropped past this, and counted. |
 | `requestTimeoutMs` | `5000` | |
 | `gzip` | `true` | Bodies of 1 KiB and over. |
 | `shutdownTimeout` | `2000` | Bound on `close()` and on the crash path. |
-| `spoolPath` | `''` | Opt-in disk spool. |
+| `spoolPath` | `''` | Opt-in disk spool, one per process. |
 | `autoFlush` | `true` | Flush on `beforeExit`. |
+| `handleSignals` | `true` | Close on `SIGTERM`/`SIGINT`. |
 | `captureErrors` | `false` | Process-wide handlers. |
-| `unhandledRejections` | `'auto'` | `'none'` never hooks rejections. |
+| `unhandledRejections` | `'auto'` | `'none'` never installs a rejection listener. |
 | `breadcrumbs` | `true` | Or `{ console, http }`. |
 | `maxBreadcrumbs` | `50` | |
 | `sampleRate` / `errorSampleRate` | `1` | Per user or device / per issue. |
 | `maxEventsPerMinute` / `maxErrorsPerMinute` | `6000` / `100` | |
-| `dedupe` | `true` | |
+| `dedupe` | `true` | The same error for the same user once per five seconds; repeats are counted. |
 | `ignoreErrors` | `[]` | Strings (substring) or regular expressions. |
 | `superProperties` | `{}` | On every event. |
 | `sendDefaultPii` | `false` | Full URLs, query strings, and request headers beyond the safe set. |
@@ -258,6 +307,7 @@ unreferenced, so a script is never kept alive by a pending flush.
 | `onError` | | Called when the SDK itself fails at something. |
 | `logger` | console | `(level, message, data) => void`. |
 | `fetch` | global | The `fetch` to send with: a proxy (`undici`'s `EnvHttpProxyAgent` through a wrapper), or a test double. |
+| `asyncLocalStorage` | global | The `AsyncLocalStorage` class, for a runtime that does not expose it globally. |
 
 ## Environment variables
 
@@ -281,15 +331,20 @@ The three usual causes: the process exited before the batch went out (call `clos
 ## How it works
 
 Events are batched and sent as JSON, compressed over 1 KiB, to `/v1/batch`; errors to
-`/v1/errors`. A `202` means the batch is durably stored and the SDK forgets it. A `503` means it
-was **not** stored and the SDK keeps it. `429` pauses only the throttled category. `413` halves the
-batch. `401`/`403` stop the SDK for good with one loud line. Everything else backs off
-exponentially with jitter, capped at thirty minutes.
+`/v1/errors`. Any `2xx` means the batch was accepted and the SDK forgets it. A `503` means it was
+**not** stored and the SDK keeps it, backing off from the server's `Retry-After`. `429` pauses only
+the throttled category; a monthly cap pauses sending and checks again at most every six hours.
+`413` halves the batch. `401`/`403` stop the SDK for good with one loud line. A redirect is never
+followed, because following it would send the write key somewhere else: it stops sending too, and
+keeps what is queued. Everything else backs off exponentially with jitter, capped at thirty
+minutes. What was dropped is counted and reported to the project, within a minute even when
+nothing else is being sent.
 
-The transport races every request against its own deadline rather than trusting an
-`AbortSignal` (an injected `fetch` may ignore one), always consumes or cancels the response body,
-and retries once when a reused keep-alive socket resets (they go stale while a serverless
-instance is frozen); the retry is safe because every item carries an id the server deduplicates on.
+The transport gives each send one deadline, covering compression, the request and reading the
+response, raced against each step rather than trusting an `AbortSignal` (an injected `fetch` may
+ignore one). It always consumes or cancels the response body, and retries once when a reused
+keep-alive socket resets (they go stale while a serverless instance is frozen); the retry is safe
+because every item carries an id the server deduplicates on.
 
 The wire contract the tests run against (limits, blocked ids, the response state machine, trait
 parsing, stack parsing across engines, deterministic sampling) is vendored in `spec/` and
@@ -302,7 +357,7 @@ published at [vinktar.com/api.md](https://vinktar.com/api.md).
 | Node | 18.17 and newer. |
 | Bun, Deno | Through the Node entry; `$runtime` on every event says which. |
 | Cloudflare Workers, Vercel Edge, Next.js middleware | Through the `edge` entry, selected automatically by the `edge-light` / `workerd` / `worker` conditions. |
-| Frameworks | Express, Fastify and NestJS adapters; anything else through `withScope` / `enterScope`. |
+| Frameworks | Express 4 and 5, Fastify 4 and 5, NestJS 10 and 11 adapters, tested against Express 5, Fastify 5 and NestJS 11 on Node 20 and newer; anything else through `withScope` / `enterScope`. |
 | Modules | ESM and CommonJS with types, `sideEffects: false`. |
 
 ## Licence

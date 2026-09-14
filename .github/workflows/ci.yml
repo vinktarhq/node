@@ -8,7 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  # The whole suite on every Node the package promises.
+  # The whole suite on every Node the package promises. The real-framework tests run on 20 and up,
+  # which is what Fastify 5 and Nest 11 need; the adapters themselves are tested on all four.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -44,7 +45,7 @@ jobs:
           mkdir -p /tmp/consumer && cd /tmp/consumer
           npm init -y > /dev/null
           npm install "$tarball"
-          node -e "const m=require('@vinktarhq/node'); for (const k of ['init','withScope','scopeFromHeaders']) if(typeof m[k]!=='function') process.exit(1)"
+          node -e "const m=require('@vinktarhq/node'); for (const k of ['init','withScope','enterScope','scopeFromHeaders','flushIfServerless']) if(typeof m[k]!=='function') process.exit(1)"
           node -e "const m=require('@vinktarhq/node/express'); if(typeof m.vinktarRequest!=='function') process.exit(1)"
           node -e "const m=require('@vinktarhq/node/fastify'); if(typeof m.vinktarFastify!=='function') process.exit(1)"
           node -e "const m=require('@vinktarhq/node/nest'); if(typeof m.VinktarExceptionFilter!=='function') process.exit(1)"

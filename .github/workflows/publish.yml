@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'npm dist-tag (use "next" for a prerelease)'
+        description: 'npm dist-tag (a prerelease version must not go to latest)'
         required: false
         default: latest
 
@@ -29,36 +29,56 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      # Trusted publishing needs npm 11.5.1 or newer. Pinning the tool rather than inheriting
-      # whatever the runner image bundles keeps a runner update from quietly turning this back
-      # into "no token, no auth, no publish".
-      - run: npm install -g npm@latest
+      # Trusted publishing needs npm 11.5.1 or newer. Pinning an exact version rather than inheriting
+      # whatever the runner image bundles, or whatever "latest" means today, keeps a runner or
+      # registry update from quietly turning this back into "no token, no auth, no publish".
+      - run: npm install -g npm@12.0.2
 
       - run: npm ci
 
       # A tag that disagrees with package.json publishes a version nobody asked for, under a name
       # nobody will look for. npm would accept it happily, and the version can never be replaced.
-      - name: the tag and package.json must agree
-        if: github.event_name == 'release'
+      # A GitHub prerelease, or any version with a prerelease suffix, goes to `next`: nobody
+      # installing `latest` should get a build that was published as a trial.
+      - name: choose the dist-tag
+        id: dist
+        env:
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -e
           manifest=$(node -p "require('./package.json').version")
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$manifest" != "$tag" ]; then
-            echo "release tag v$tag does not match package.json $manifest" >&2
-            exit 1
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$manifest" != "$tag" ]; then
+              echo "release tag v$tag does not match package.json $manifest" >&2
+              exit 1
+            fi
+            if [ "$RELEASE_PRERELEASE" = "true" ]; then dist=next; else dist=latest; fi
+          else
+            if [ "$(git describe --tags --exact-match 2>/dev/null)" != "v$manifest" ]; then
+              echo "the checked-out commit is not tagged v$manifest; dispatch the workflow from the release tag" >&2
+              exit 1
+            fi
+            dist="${INPUT_TAG:-latest}"
           fi
-          echo "publishing $manifest"
+          case "$manifest" in
+            *-*) if [ "$dist" = "latest" ]; then echo "$manifest is a prerelease and cannot be published as latest" >&2; exit 1; fi ;;
+          esac
+          echo "tag=$dist" >> "$GITHUB_OUTPUT"
+          echo "publishing $manifest as $dist"
 
       # `prepack` builds, `prepublishOnly` tests. Nothing is uploaded
       # until they pass. No `env:` block: the OIDC token is exchanged by npm itself.
-      - run: npm publish --tag "${{ inputs.tag || 'latest' }}"
+      - run: npm publish --tag "${{ steps.dist.outputs.tag }}"
 
       - name: prove it is installable
         run: |
