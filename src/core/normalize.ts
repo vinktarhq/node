@@ -163,6 +163,25 @@ export function isSensitiveKey(key: string, extra: readonly string[] = []): bool
   return false;
 }
 
+/**
+ * The server counts an event's payload keys and context keys together against one cap, and
+ * refuses the whole event over it. Context is the SDK's own and comes first; payload keys past
+ * the room that is left are dropped here, each one reported, rather than losing the event.
+ */
+export function capCombined(payload: Props, context: Props, max: number = MAX_PROPERTIES_PER_EVENT, onDrop?: (key: string) => void): Props {
+  const room = Math.max(0, max - Object.keys(context).length);
+  const keys = Object.keys(payload);
+  if (keys.length <= room) return payload;
+
+  const out: Props = {};
+  keys.forEach((key, index) => {
+    if (index < room) out[key] = payload[key];
+    else onDrop?.(key);
+  });
+
+  return out;
+}
+
 /** Tags are their own shape: flat, string-valued, and capped tighter than properties. */
 export function normalizeTags(
   tags: Record<string, unknown>,
