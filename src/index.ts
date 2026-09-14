@@ -27,8 +27,6 @@ export type {
 } from './types.js';
 export type { WaitUntilContext } from './node/serverless.js';
 
-const storage = new AsyncLocalStorage<Scope>();
-
 export const nodePlatform: Platform = {
   name: 'node',
   runtime: detectRuntime(),
@@ -47,11 +45,12 @@ export const nodePlatform: Platform = {
     new Promise((resolve) => {
       gzip(text, (error, result) => resolve(error ? null : new Uint8Array(result.buffer, result.byteOffset, result.byteLength)));
     }),
-  scopeStore: (root) => asyncScopeStore(storage, root),
+  // One storage per client: a scope entered through one client is invisible to every other.
+  scopeStore: (root, options) => asyncScopeStore(new (options.asyncLocalStorage ?? AsyncLocalStorage<Scope>)(), root),
   readSource: (path) => readFileSync(path, 'utf8'),
   process: process as unknown as NonNullable<Platform['process']>,
   isMainThread,
-  spool: (path, logger) => new Spool(path, { ...fs, dirname }, process.pid, logger),
+  spool: (path, logger, owner) => new Spool(path, { ...fs, dirname }, process.pid, logger, owner),
   deferred: false,
 };
 
@@ -78,8 +77,10 @@ export const setTags = facade.setTags;
 export const setContext = facade.setContext;
 export const scope = facade.scope;
 export const withScope = facade.withScope;
+export const enterScope = facade.enterScope;
 export const scopeFromHeaders = facade.scopeFromHeaders;
 export const registerHandlers = facade.registerHandlers;
 export const setSourceReader = facade.setSourceReader;
 export const flush = facade.flush;
+export const flushIfServerless = facade.flushIfServerless;
 export const close = facade.close;

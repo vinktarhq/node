@@ -1,18 +1,20 @@
 import type { Platform } from './client.js';
 import { createFacade } from './facade.js';
 import { detectRuntime } from './node/context.js';
-import { asyncScopeStore, Scope, stackScopeStore } from './node/scope.js';
-import type { WaitUntilContext } from './node/serverless.js';
+import { asyncScopeStore, stackScopeStore, type AsyncLocalStorageLike } from './node/scope.js';
 
 /**
  * The edge entry: Cloudflare Workers, Vercel Edge, Deno Deploy, Next.js middleware and anything
  * else that runs a handler per request with no process and no background.
  *
- * Nothing here imports a `node:` module. Compression is `CompressionStream`; the scope store is
- * `AsyncLocalStorage` when the runtime exposes one (Workers do, behind a flag; Vercel Edge does)
- * and a plain stack otherwise; and **sends are deferred**: nothing goes out until `flush()` or
- * `flushIfServerless()` asks, because a request the runtime finds running after the handler
- * returned is a request it will kill.
+ * Nothing here imports a `node:` module. Compression is `CompressionStream`. The scope store is an
+ * `AsyncLocalStorage` of this client's own: the one passed as `asyncLocalStorage` to `init()`, or
+ * the runtime's global one where it exposes it (Vercel Edge does). Cloudflare Workers expose it
+ * only through `import { AsyncLocalStorage } from 'node:async_hooks'` with the `nodejs_als` or
+ * `nodejs_compat` flag, so pass it in there. Without one, concurrent requests share a scope; the
+ * SDK says so once, the first time it sees them overlap. **Sends are deferred**: nothing goes out
+ * until `flush()` or `flushIfServerless()` asks, because a request the runtime finds running after
+ * the handler returned is a request it will kill.
  *
  *     export default {
  *       async fetch(request, env, ctx) {
@@ -32,13 +34,11 @@ export type {
 } from './types.js';
 export type { WaitUntilContext } from './node/serverless.js';
 
-type Als = { getStore(): Scope | undefined; run<T>(store: Scope, fn: () => T): T; enterWith(store: Scope): void };
-
-function asyncLocalStorage(): Als | null {
-  const ctor = (globalThis as { AsyncLocalStorage?: new () => Als }).AsyncLocalStorage;
-  if (typeof ctor !== 'function') return null;
+function asyncLocalStorage(ctor: (new () => AsyncLocalStorageLike) | undefined): AsyncLocalStorageLike | null {
+  const found = ctor ?? (globalThis as { AsyncLocalStorage?: new () => AsyncLocalStorageLike }).AsyncLocalStorage;
+  if (typeof found !== 'function') return null;
   try {
-    return new ctor();
+    return new found();
   } catch {
     return null;
   }
@@ -61,14 +61,16 @@ async function compress(text: string): Promise<Uint8Array | null> {
   }
 }
 
-const als = asyncLocalStorage();
-
 export const edgePlatform: Platform = {
   name: 'edge',
   runtime: detectRuntime(),
   environment: { env, hostname: () => '', cwd: () => '' },
   compress,
-  scopeStore: (root) => (als !== null ? asyncScopeStore(als, root) : stackScopeStore(root)),
+  scopeStore: (root, options) => {
+    const storage = asyncLocalStorage(options.asyncLocalStorage);
+
+    return storage !== null ? asyncScopeStore(storage, root) : stackScopeStore(root, options.onOverlap);
+  },
   deferred: true,
 };
 
@@ -95,13 +97,11 @@ export const setTags = facade.setTags;
 export const setContext = facade.setContext;
 export const scope = facade.scope;
 export const withScope = facade.withScope;
+export const enterScope = facade.enterScope;
 export const scopeFromHeaders = facade.scopeFromHeaders;
 export const registerHandlers = facade.registerHandlers;
 export const setSourceReader = facade.setSourceReader;
 export const flush = facade.flush;
-export const close = facade.close;
-
 /** Flush through the platform's `waitUntil` when there is one, inline when there is not. */
-export function flushIfServerless(options: { context?: WaitUntilContext | undefined; timeoutMs?: number } = {}): Promise<void> {
-  return facade.getClient()?.flushIfServerless(options) ?? Promise.resolve();
-}
+export const flushIfServerless = facade.flushIfServerless;
+export const close = facade.close;

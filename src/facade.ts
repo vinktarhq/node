@@ -2,6 +2,7 @@ import { Scope } from './node/scope.js';
 import type { Platform, Vinktar } from './client.js';
 import { Vinktar as Client } from './client.js';
 import type { VinktarOptions } from './options.js';
+import type { WaitUntilContext } from './node/serverless.js';
 import type { Breadcrumb, CaptureContext, EventOptions, IdentifyOptions, Props, SourceReader, Traits, User } from './types.js';
 
 /**
@@ -11,6 +12,10 @@ import type { Breadcrumb, CaptureContext, EventOptions, IdentifyOptions, Props, 
  * warning surfaces on the first run, where a buffer would hide it and replay stale events with
  * the wrong scope later. `withScope` is the one exception: the work still runs, on a throwaway
  * scope, because the callback is the application's code and must not be skipped.
+ *
+ * The default client is held on `globalThis`, so an application that ends up loading both the
+ * CommonJS and the ES module build of this package (a dependency requires one, the app imports
+ * the other) still has one client, not two that each think they are the only one.
  */
 export interface Facade {
   init(options?: VinktarOptions | string): Vinktar;
@@ -34,34 +39,42 @@ export interface Facade {
   setContext(context: Props | null): void;
   scope(): Scope;
   withScope<T>(work: (scope: Scope) => T): T;
+  enterScope(): Scope;
   scopeFromHeaders(headers: Record<string, string | string[] | undefined> | Headers | undefined): Scope;
   registerHandlers(): void;
   setSourceReader(reader: SourceReader): void;
   flush(): Promise<boolean>;
+  flushIfServerless(options?: { context?: WaitUntilContext | undefined; timeoutMs?: number }): Promise<void>;
   close(): Promise<boolean>;
 }
 
+interface State {
+  client: Vinktar | null;
+}
+
 export function createFacade(platform: Platform, warn: (message: string) => void): Facade {
-  let client: Vinktar | null = null;
+  const key = Symbol.for(`vinktar.${platform.name}.facade`);
+  const holder = globalThis as unknown as Record<symbol, State | undefined>;
+  const state = (holder[key] ??= { client: null });
 
   const need = (method: string): Vinktar | null => {
-    if (client === null) warn(`${method}() was called before init(); nothing happened`);
+    if (state.client === null) warn(`${method}() was called before init(); nothing happened`);
 
-    return client;
+    return state.client;
   };
 
   return {
     init(options = {}) {
-      if (client !== null) {
+      if (state.client !== null) {
         warn('init() was called twice; the first client is kept');
 
-        return client;
+        return state.client;
       }
-      client = new Client(options, platform);
+      state.client = new Client(options, platform);
 
-      return client;
+      return state.client;
     },
-    getClient: () => client,
+    getClient: () => state.client,
     track: (name, properties, options) => need('track')?.track(name, properties, options),
     page: (name, properties, options) => need('page')?.page(name, properties, options),
     identify: (userId, traits, traitsOnce, options) => need('identify')?.identify(userId, traits, traitsOnce, options),
@@ -80,14 +93,16 @@ export function createFacade(platform: Platform, warn: (message: string) => void
     setTags: (tags) => need('setTags')?.setTags(tags),
     setContext: (context) => need('setContext')?.setContext(context),
     scope: () => need('scope')?.scope() ?? new Scope(0),
-    withScope: (work) => (client !== null ? client.withScope(work) : work(new Scope(0))),
+    withScope: (work) => (state.client !== null ? state.client.withScope(work) : work(new Scope(0))),
+    enterScope: () => need('enterScope')?.enterScope() ?? new Scope(0),
     scopeFromHeaders: (headers) => need('scopeFromHeaders')?.scopeFromHeaders(headers) ?? new Scope(0),
     registerHandlers: () => need('registerHandlers')?.registerHandlers(),
     setSourceReader: (reader) => need('setSourceReader')?.setSourceReader(reader),
-    flush: () => client?.flush() ?? Promise.resolve(true),
+    flush: () => state.client?.flush() ?? Promise.resolve(true),
+    flushIfServerless: (options) => state.client?.flushIfServerless(options) ?? Promise.resolve(),
     close: () => {
-      const current = client;
-      client = null;
+      const current = state.client;
+      state.client = null;
 
       return current?.close() ?? Promise.resolve(true);
     },
