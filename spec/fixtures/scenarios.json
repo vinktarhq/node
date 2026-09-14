@@ -1,0 +1,387 @@
+{
+  "$comment": "Behaviour an SDK must show through its public API. Each SDK runs these against a scripted transport; the wire items it sends are what is asserted, never internal state.",
+  "version": 1,
+  "$notes": {
+    "capability": "common: every SDK. backend: SDKs serving many people from one process (scopes, per-call identity, several clients). browser: the page-owned identity SDK.",
+    "respond": "Responses served in order to the SDK's requests, each {status, body?, headers?}. Once exhausted, every request gets 202 {received, rejected: 0, errors: []}. `endpoint` restricts a response to requests for that path.",
+    "clients": "Named clients, each with its own write key. Steps and expectations address one with `client`; the default is the first. A browser SDK only runs scenarios with one client.",
+    "steps": "{do, args?, client?} calls a public method. `withScope` and `enterScope` take nested `steps`. `parallel` runs `branches` concurrently; a {do: 'yield'} step waits one macrotask so branches interleave deterministically. `returns` asserts the (awaited) result; `throws` asserts the message of what the call threw. `error(message)` in args is a new Error with that message; `bigint(n)` is a BigInt.",
+    "hooks": "`options.hooks` names a hook behaviour instead of code: poisonProperty adds a BigInt property to events whose name is `poison`.",
+    "expect": "`sent`: each entry must match at least one wire item (partial deep match; null means the key is absent or empty; an array matches element-wise from the start). `notSent`: no wire item may match. `requests`: exact request count per endpoint. `errorCount`: {message: n} occurrences sent. `report`: entries that must appear in some request's client_report.discarded. Endpoints: /v1/batch events are `item` (the `batch[]` entries) and identify entries are `identify` (the `identify[]` entries); /v1/errors items are `item` (the `errors[]` entries). An error's message is `exceptions[0].value`.",
+    "pseudoSteps": "{do: 'value', args: [v]} makes the enclosing callback return v. {do: 'throw', args: [message]} throws new Error(message). {do: 'close', await: false} starts close without waiting, and {do: 'awaitClose'} waits for that same close. `props(N)` in args is an object with N distinct string properties.",
+    "matchers": "`maxTopLevelKeys: {of, max}` counts the union of top-level keys across the named fields of the matched item. `capture: {field: label}` remembers the matched item's field value under label; `differs: {field: label}` requires the field to be present and different from the remembered value."
+  },
+  "scenarios": [
+    {
+      "name": "flush with nothing queued succeeds",
+      "capability": "common",
+      "steps": [{ "do": "flush", "returns": true }],
+      "expect": { "requests": { "/v1/batch": 0, "/v1/errors": 0 } }
+    },
+    {
+      "name": "flush after storage failure reports failure until the data is accepted",
+      "capability": "common",
+      "respond": [{ "status": 503, "body": { "error": "storage_unavailable" }, "headers": { "Retry-After": "10" } }],
+      "steps": [
+        { "do": "track", "args": ["kept"] },
+        { "do": "flush", "returns": false },
+        { "do": "flush", "returns": false }
+      ],
+      "expect": { "requests": { "/v1/batch": 1 } }
+    },
+    {
+      "name": "a permanently refused batch is a failed flush, and is not resent",
+      "capability": "common",
+      "respond": [{ "status": 400, "body": { "error": "invalid_payload" } }],
+      "steps": [
+        { "do": "track", "args": ["refused"] },
+        { "do": "flush", "returns": false },
+        { "do": "flush", "returns": true }
+      ],
+      "expect": { "requests": { "/v1/batch": 1 } }
+    },
+    {
+      "name": "a per-record rejection inside a 202 is a failed flush",
+      "capability": "common",
+      "respond": [{ "status": 202, "body": { "received": 1, "rejected": 1, "errors": [{ "index": 1, "code": "missing_name" }] } }],
+      "steps": [
+        { "do": "track", "args": ["a"] },
+        { "do": "track", "args": ["b"] },
+        { "do": "flush", "returns": false }
+      ]
+    },
+    {
+      "name": "a proxy's 200 is an acceptance",
+      "capability": "common",
+      "respond": [{ "status": 200 }],
+      "steps": [
+        { "do": "track", "args": ["proxied"] },
+        { "do": "flush", "returns": true },
+        { "do": "flush", "returns": true }
+      ],
+      "expect": { "requests": { "/v1/batch": 1 } }
+    },
+    {
+      "name": "a redirect stops sending and forwards nothing",
+      "capability": "common",
+      "respond": [{ "status": 307, "headers": { "Location": "https://elsewhere.example/v1/batch" } }],
+      "steps": [
+        { "do": "track", "args": ["first"] },
+        { "do": "flush", "returns": false },
+        { "do": "track", "args": ["second"] },
+        { "do": "flush", "returns": false }
+      ],
+      "expect": { "requests": { "/v1/batch": 1 } }
+    },
+    {
+      "name": "a revoked key stops admission",
+      "capability": "common",
+      "respond": [{ "status": 401, "body": { "error": "invalid_api_key" } }],
+      "steps": [
+        { "do": "track", "args": ["before"] },
+        { "do": "flush", "returns": false },
+        { "do": "track", "args": ["after"] },
+        { "do": "flush" }
+      ],
+      "expect": { "requests": { "/v1/batch": 1 }, "notSent": [{ "endpoint": "/v1/batch", "item": { "name": "after" } }] }
+    },
+    {
+      "name": "a second close reports the first close's failure",
+      "capability": "common",
+      "respond": [
+        { "status": 503, "body": { "error": "storage_unavailable" } },
+        { "status": 503, "body": { "error": "storage_unavailable" } },
+        { "status": 503, "body": { "error": "storage_unavailable" } }
+      ],
+      "options": { "shutdownTimeout": 200 },
+      "steps": [
+        { "do": "track", "args": ["lost"] },
+        { "do": "close", "returns": false },
+        { "do": "close", "returns": false }
+      ]
+    },
+    {
+      "name": "close refuses new work immediately",
+      "capability": "common",
+      "steps": [
+        { "do": "track", "args": ["in time"] },
+        { "do": "close", "await": false },
+        { "do": "track", "args": ["too late"] },
+        { "do": "awaitClose", "returns": true }
+      ],
+      "expect": {
+        "sent": [{ "endpoint": "/v1/batch", "item": { "name": "in time" } }],
+        "notSent": [{ "endpoint": "/v1/batch", "item": { "name": "too late" } }]
+      }
+    },
+    {
+      "name": "withScope returns the callback's value",
+      "capability": "common",
+      "steps": [{ "do": "withScope", "steps": [{ "do": "value", "args": [42] }], "returns": 42 }]
+    },
+    {
+      "name": "withScope lets the callback's exception through without reporting it",
+      "capability": "common",
+      "steps": [
+        { "do": "withScope", "steps": [{ "do": "throw", "args": ["boom"] }], "throws": "boom" },
+        { "do": "flush" }
+      ],
+      "expect": { "requests": { "/v1/errors": 0 } }
+    },
+    {
+      "name": "captureMessage honours handled: false",
+      "capability": "common",
+      "steps": [
+        { "do": "captureMessage", "args": ["worker crashed", { "handled": false }] },
+        { "do": "captureMessage", "args": ["noted"] },
+        { "do": "flush" }
+      ],
+      "expect": {
+        "sent": [
+          { "endpoint": "/v1/errors", "item": { "exceptions": [{ "value": "worker crashed" }], "mechanism": { "handled": false } } },
+          { "endpoint": "/v1/errors", "item": { "exceptions": [{ "value": "noted" }], "mechanism": { "handled": true } } }
+        ]
+      }
+    },
+    {
+      "name": "captureException honours handled: false",
+      "capability": "common",
+      "steps": [
+        { "do": "captureException", "args": ["error(payment failed)", { "handled": false }] },
+        { "do": "flush" }
+      ],
+      "expect": { "sent": [{ "endpoint": "/v1/errors", "item": { "mechanism": { "handled": false } } }] }
+    },
+    {
+      "name": "a hook that returns something unserialisable costs only that record",
+      "capability": "common",
+      "options": { "hooks": "poisonProperty" },
+      "steps": [
+        { "do": "track", "args": ["good"] },
+        { "do": "track", "args": ["poison"] },
+        { "do": "track", "args": ["also good"] },
+        { "do": "flush", "returns": true }
+      ],
+      "expect": {
+        "sent": [
+          { "endpoint": "/v1/batch", "item": { "name": "good" } },
+          { "endpoint": "/v1/batch", "item": { "name": "also good" } }
+        ],
+        "notSent": [{ "endpoint": "/v1/batch", "item": { "name": "poison" } }]
+      }
+    },
+    {
+      "name": "payload and context together stay within the server's property cap",
+      "capability": "common",
+      "steps": [
+        { "do": "track", "args": ["wide", "props(255)"] },
+        { "do": "flush", "returns": true }
+      ],
+      "expect": { "sent": [{ "endpoint": "/v1/batch", "item": { "name": "wide" }, "maxTopLevelKeys": { "of": ["payload", "context"], "max": 255 } }] }
+    },
+    {
+      "name": "an immediate repeat of one error is sent once",
+      "capability": "common",
+      "steps": [
+        { "do": "captureMessage", "args": ["same"] },
+        { "do": "captureMessage", "args": ["same"] },
+        { "do": "flush" }
+      ],
+      "expect": { "requests": { "/v1/errors": 1 }, "errorCount": { "same": 1 }, "report": [{ "reason": "deduplicated", "category": "error", "quantity": 1 }] }
+    },
+    {
+      "name": "registered properties do not follow a job into the next one",
+      "capability": "backend",
+      "steps": [
+        { "do": "withScope", "steps": [{ "do": "setUser", "args": [{ "id": "alice" }] }, { "do": "register", "args": [{ "customer_email": "alice@example.test" }] }, { "do": "track", "args": ["alice job"] }] },
+        { "do": "withScope", "steps": [{ "do": "setUser", "args": [{ "id": "bob" }] }, { "do": "track", "args": ["bob job"] }] },
+        { "do": "flush" }
+      ],
+      "expect": {
+        "sent": [
+          { "endpoint": "/v1/batch", "item": { "name": "alice job", "user_id": "alice", "payload": { "customer_email": "alice@example.test" } } },
+          { "endpoint": "/v1/batch", "item": { "name": "bob job", "user_id": "bob", "payload": { "customer_email": null } } }
+        ]
+      }
+    },
+    {
+      "name": "concurrent jobs cannot overwrite each other's registered properties",
+      "capability": "backend",
+      "steps": [
+        {
+          "do": "parallel",
+          "branches": [
+            [{ "do": "withScope", "steps": [{ "do": "register", "args": [{ "account": "A" }] }, { "do": "yield" }, { "do": "yield" }, { "do": "track", "args": ["job A"] }] }],
+            [{ "do": "withScope", "steps": [{ "do": "yield" }, { "do": "register", "args": [{ "account": "B" }] }, { "do": "track", "args": ["job B"] }] }]
+          ]
+        },
+        { "do": "flush" }
+      ],
+      "expect": {
+        "sent": [
+          { "endpoint": "/v1/batch", "item": { "name": "job A", "payload": { "account": "A" } } },
+          { "endpoint": "/v1/batch", "item": { "name": "job B", "payload": { "account": "B" } } }
+        ]
+      }
+    },
+    {
+      "name": "one client's scope is invisible to another client",
+      "capability": "backend",
+      "clients": ["a", "b"],
+      "steps": [
+        {
+          "do": "withScope",
+          "client": "a",
+          "steps": [
+            { "do": "setUser", "client": "a", "args": [{ "id": "alice" }] },
+            { "do": "setTag", "client": "a", "args": ["account", "A"] },
+            { "do": "track", "client": "b", "args": ["from b"] },
+            { "do": "captureMessage", "client": "b", "args": ["b failed"] }
+          ]
+        },
+        { "do": "flush", "client": "b" }
+      ],
+      "expect": {
+        "sent": [
+          { "client": "b", "endpoint": "/v1/batch", "item": { "name": "from b", "user_id": null } },
+          { "client": "b", "endpoint": "/v1/errors", "item": { "user_id": null, "tags": { "account": null } } }
+        ]
+      }
+    },
+    {
+      "name": "setUser(null) clears the user and nothing else",
+      "capability": "backend",
+      "steps": [
+        {
+          "do": "withScope",
+          "steps": [
+            { "do": "scopeFromHeaders", "args": [{ "x-vinktar-device-id": "device-alice" }] },
+            { "do": "setUser", "args": [{ "id": "alice" }] },
+            { "do": "setUser", "args": [null] },
+            { "do": "track", "args": ["after clear"] }
+          ]
+        },
+        { "do": "flush" }
+      ],
+      "expect": { "sent": [{ "endpoint": "/v1/batch", "item": { "name": "after clear", "user_id": null, "device_id": "device-alice" } }] }
+    },
+    {
+      "name": "reset never restores a configured identity or runtime properties",
+      "capability": "backend",
+      "options": { "initialScope": { "userId": "seeded-user", "deviceId": "seeded-device", "tags": { "service": "api" } } },
+      "steps": [
+        { "do": "register", "args": [{ "plan": "pro" }] },
+        { "do": "reset" },
+        { "do": "track", "args": ["after reset"] },
+        { "do": "captureMessage", "args": ["after reset"] },
+        { "do": "flush" }
+      ],
+      "expect": {
+        "sent": [
+          { "endpoint": "/v1/batch", "item": { "name": "after reset", "user_id": null, "device_id": null, "payload": { "plan": null } } },
+          { "endpoint": "/v1/errors", "item": { "user_id": null, "tags": { "service": "api" } } }
+        ]
+      }
+    },
+    {
+      "name": "a fresh scope inherits no actor",
+      "capability": "backend",
+      "steps": [
+        { "do": "setUser", "args": [{ "id": "leftover" }] },
+        { "do": "enterScope", "steps": [{ "do": "track", "args": ["request"] }] },
+        { "do": "flush" }
+      ],
+      "expect": { "sent": [{ "endpoint": "/v1/batch", "item": { "name": "request", "user_id": null } }] }
+    },
+    {
+      "name": "the same error in two users' jobs is two occurrences",
+      "capability": "backend",
+      "steps": [
+        { "do": "withScope", "steps": [{ "do": "setUser", "args": [{ "id": "alice" }] }, { "do": "captureMessage", "args": ["checkout failed"] }] },
+        { "do": "withScope", "steps": [{ "do": "setUser", "args": [{ "id": "bob" }] }, { "do": "captureMessage", "args": ["checkout failed"] }] },
+        { "do": "flush" }
+      ],
+      "expect": {
+        "sent": [
+          { "endpoint": "/v1/errors", "item": { "user_id": "alice" } },
+          { "endpoint": "/v1/errors", "item": { "user_id": "bob" } }
+        ]
+      }
+    },
+    {
+      "name": "error context and analytics properties stay separate",
+      "capability": "backend",
+      "steps": [
+        { "do": "setContext", "args": [{ "region": "east" }] },
+        { "do": "register", "args": [{ "plan": "pro" }] },
+        { "do": "track", "args": ["placed"] },
+        { "do": "captureMessage", "args": ["placed"] },
+        { "do": "flush" }
+      ],
+      "expect": {
+        "sent": [
+          { "endpoint": "/v1/batch", "item": { "name": "placed", "payload": { "plan": "pro", "region": null } } },
+          { "endpoint": "/v1/errors", "item": { "context": { "region": "east", "plan": null } } }
+        ]
+      }
+    },
+    {
+      "name": "an invalid explicit user id never becomes someone else",
+      "capability": "backend",
+      "steps": [
+        { "do": "setUser", "args": [{ "id": "alice" }] },
+        { "do": "track", "args": ["refused", {}, { "userId": "guest" }] },
+        { "do": "captureMessage", "args": ["still reported", { "userId": "guest" }] },
+        { "do": "flush" }
+      ],
+      "expect": {
+        "notSent": [{ "endpoint": "/v1/batch", "item": { "name": "refused" } }],
+        "sent": [{ "endpoint": "/v1/errors", "item": { "exceptions": [{ "value": "still reported" }], "user_id": null, "device_id": null } }],
+        "report": [{ "reason": "invalid", "category": "event", "quantity": 1 }]
+      }
+    },
+    {
+      "name": "a per-call device on identify does not stick to later events",
+      "capability": "backend",
+      "steps": [
+        { "do": "identify", "args": ["alice", null, null, { "deviceId": "device-x" }] },
+        { "do": "track", "args": ["later"] },
+        { "do": "flush" }
+      ],
+      "expect": {
+        "sent": [
+          { "endpoint": "/v1/batch", "item": { "name": "later", "user_id": "alice", "device_id": null } },
+          { "endpoint": "/v1/batch", "identify": { "user_id": "alice", "device_id": "device-x" } }
+        ]
+      }
+    },
+    {
+      "name": "a disabled client needs no key and sends nothing",
+      "capability": "backend",
+      "options": { "enabled": false, "writeKey": null },
+      "steps": [
+        { "do": "track", "args": ["ignored"] },
+        { "do": "flush", "returns": true },
+        { "do": "close", "returns": true }
+      ],
+      "expect": { "requests": { "/v1/batch": 0, "/v1/errors": 0 } }
+    },
+    {
+      "name": "reset on the page rotates the device and forgets the user",
+      "capability": "browser",
+      "steps": [
+        { "do": "identify", "args": ["alice"] },
+        { "do": "track", "args": ["before"] },
+        { "do": "reset" },
+        { "do": "track", "args": ["after"] },
+        { "do": "flush" }
+      ],
+      "expect": {
+        "sent": [
+          { "endpoint": "/v1/batch", "item": { "name": "before", "user_id": "alice" }, "capture": { "device_id": "first" } },
+          { "endpoint": "/v1/batch", "item": { "name": "after", "user_id": null }, "differs": { "device_id": "first" } }
+        ]
+      }
+    }
+  ]
+}

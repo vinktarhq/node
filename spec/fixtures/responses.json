@@ -1,217 +1,320 @@
 {
-  "$comment": "Status + body → what the SDK must do. This table is the transport, and getting one row wrong is a data-loss bug: treating 503 as success drops a batch the server never stored. Actions: drop (durably queued, forget it) | retry (keep, back off) | split (halve and resend) | hold (pause these categories) | shutdown (stop sending entirely) | degrade (change a setting, retry once).",
+  "$comment": "Status + body + headers → what the SDK must do. This table is the transport, and getting one row wrong is a data-loss bug: treating 503 as success drops a batch the server never stored. Actions: drop (accepted, or permanently refused: forget it) | retry (keep, back off) | split (halve and resend) | hold (pause categories) | shutdown (stop sending entirely) | degrade (change a setting, retry once).",
   "$notes": {
-    "categories": "Inferred from the endpoint, never parsed from a header: /v1/batch is ['event','identify'], /v1/errors is ['error']. The server hardcodes exactly this.",
-    "headers": "Retry-After and X-RateLimit-Categories are exposed cross-origin. Backoff must still work on a local schedule when they are absent, and use them when present: Retry-After sets the wait, X-RateLimit-Categories narrows which categories are held.",
-    "bodyShapes": "Two 400s come from the pre-controller listener and use {\"message\": ...}; everything else uses {\"error\": ...}. Read `error ?? message`."
+    "categories": "A hold starts from the endpoint's own categories: /v1/batch is ['event','identify'], /v1/errors is ['error']. X-RateLimit-Categories may narrow that set to the categories it names; it never widens it. A header naming nothing the endpoint governs is ignored, and the endpoint's categories are held.",
+    "headers": "Retry-After is delta-seconds or an HTTP-date. X-RateLimit-Categories is `<seconds>:<cat>;<cat>`; when its seconds part is missing or zero, Retry-After sets the wait. With neither, the wait is the local escalating schedule.",
+    "monthly": "A monthly cap holds for the server's Retry-After, but never longer than six hours at a time: a customer who upgrades mid-month starts sending again within hours instead of weeks, and one refused request every six hours costs nothing. Absent a Retry-After, hold six hours.",
+    "success": "Any 2xx is an acceptance. 202 is what ingest sends; a proxy may answer 200 or 204, and treating those as failures resends accepted data.",
+    "redirects": "Never follow a redirect: fetch re-sends the body and the X-Vinktar-Key header to wherever it points. A 3xx means the endpoint is misconfigured; stop sending and say so.",
+    "bodyShapes": "Two 400s come from the pre-controller listener and use {\"message\": ...}; everything else uses {\"error\": ...}. Read `error ?? message`.",
+    "fields": "`endpoint` defaults to /v1/batch. `wait` is seconds, or \"escalating\" for the local schedule. `categories` is the final held set. `source` says who produces the response: server (asserted against the real server), proxy, or network. A header value `<<now+Ns as HTTP-date>>` is rendered as the HTTP-date N seconds after the test's clock."
   },
   "cases": [
     {
       "name": "accepted and durable",
+      "source": "server",
       "status": 202,
-      "body": {
-        "received": 12,
-        "rejected": 0,
-        "errors": []
-      },
+      "body": { "received": 12, "rejected": 0, "errors": [] },
       "action": "drop",
-      "why": "202 means durably queued in ClickHouse, not merely received. Committing the client report here is safe."
+      "why": "202 means durably queued in ClickHouse, not merely received. The client report carried by this request is committed here."
     },
     {
       "name": "accepted with per-event rejections",
+      "source": "server",
       "status": 202,
-      "body": {
-        "received": 11,
-        "rejected": 1,
-        "errors": [
-          {
-            "index": 4,
-            "code": "missing_name"
-          }
-        ]
-      },
+      "body": { "received": 11, "rejected": 1, "errors": [{ "index": 4, "code": "missing_name" }] },
       "action": "drop",
       "surface": "errors",
-      "why": "A bad event never fails the batch. Log it in debug mode; do not resend, the server will reject it identically."
+      "why": "A bad event never fails the batch, but the rejected one was not stored: a flush containing it is not a successful flush. Warn; do not resend, the server will reject it identically."
     },
     {
       "name": "accepted with traits dropped",
+      "source": "server",
       "status": 202,
-      "body": {
-        "received": 1,
-        "rejected": 0,
-        "errors": [],
-        "traits_dropped": [
-          {
-            "user_id": "u1",
-            "key": "bio",
-            "code": "value_too_large"
-          }
-        ]
-      },
+      "body": { "received": 1, "rejected": 0, "errors": [], "traits_dropped": [{ "user_id": "u1", "key": "bio", "code": "value_too_large" }] },
       "action": "drop",
       "surface": "traits_dropped",
       "why": "The identity link landed; only the named trait did not. Warn, do not retry."
     },
     {
       "name": "identify ignored",
+      "source": "server",
       "status": 202,
-      "body": {
-        "received": 1,
-        "rejected": 0,
-        "errors": [],
-        "identify_ignored": [
-          {
-            "device_id": "d1",
-            "user_id": "bob",
-            "code": "no_op"
-          }
-        ]
-      },
+      "body": { "received": 1, "rejected": 0, "errors": [], "identify_ignored": [{ "device_id": "d1", "user_id": "bob", "code": "no_op" }] },
       "action": "drop",
       "surface": "identify_ignored",
-      "why": "The entry carried nothing to do. Surface it; retrying will be ignored identically. Note the codes are only what ingest can see for itself (missing_user_id, blocked_id, blocked_device_id, no_op) — a refused rebind is resolved at read time and is never reported here."
+      "why": "The entry carried nothing to do. Surface it; retrying will be ignored identically. The codes are only what ingest can see for itself (missing_user_id, blocked_id, blocked_device_id, no_op): a refused rebind is resolved at read time and never reported here."
     },
     {
       "name": "accepted with suppressed occurrences",
+      "source": "server",
+      "endpoint": "/v1/errors",
       "status": 202,
-      "body": {
-        "received": 3,
-        "rejected": 0,
-        "errors": [],
-        "suppressed": 2
-      },
+      "body": { "received": 3, "rejected": 0, "suppressed": 2, "errors": [] },
       "action": "drop",
       "surface": "suppressed",
       "why": "Two occurrences matched the inbound filter: not stored, not billed. Surface the count; nothing to retry."
     },
     {
+      "name": "accepted by a proxy with 200",
+      "source": "proxy",
+      "status": 200,
+      "body": null,
+      "action": "drop",
+      "why": "Any 2xx is an acceptance. Retrying it sends the same data twice."
+    },
+    {
+      "name": "accepted by a proxy with 204",
+      "source": "proxy",
+      "status": 204,
+      "body": null,
+      "action": "drop"
+    },
+    {
+      "name": "redirect",
+      "source": "proxy",
+      "status": 307,
+      "body": null,
+      "action": "shutdown",
+      "why": "Following it would forward the write key and the body to another origin. The endpoint is misconfigured; stop and surface it once."
+    },
+    {
       "name": "invalid gzip",
+      "source": "server",
       "status": 400,
-      "body": {
-        "message": "Invalid gzip in request body"
-      },
+      "body": { "message": "Invalid gzip in request body" },
       "action": "degrade",
       "degrade": "disableGzip",
       "why": "Our compression produced something the server could not inflate. Retry once uncompressed rather than losing the batch."
     },
     {
       "name": "invalid JSON",
+      "source": "server",
       "status": 400,
-      "body": {
-        "message": "Invalid JSON in request body"
-      },
+      "body": { "message": "Invalid JSON in request body" },
       "action": "drop",
-      "why": "Our serializer produced junk. Retrying sends the same junk."
+      "why": "Our serializer produced junk. Retrying sends the same junk. Count it as `invalid`."
     },
     {
       "name": "bad request",
+      "source": "server",
+      "endpoint": "/v1/identify",
       "status": 400,
-      "body": {
-        "error": "user_id_required"
-      },
+      "body": { "error": "user_id_required" },
       "action": "drop",
       "why": "Never retry a 4xx that is not 413 or 429."
     },
     {
+      "name": "identify with nothing to do",
+      "source": "server",
+      "endpoint": "/v1/identify",
+      "status": 400,
+      "body": { "error": "device_id_or_traits_required" },
+      "action": "drop"
+    },
+    {
       "name": "missing key",
+      "source": "server",
       "status": 401,
-      "body": {
-        "error": "missing_api_key"
-      },
+      "body": { "error": "missing_api_key" },
       "action": "shutdown",
-      "why": "A config error, not a transient one. Stop sending and surface it once; continuing to buffer is a memory leak that never drains."
+      "why": "A config error, not a transient one. Stop sending and stop accepting new work; surface it once. Continuing to buffer is a memory leak that never drains."
     },
     {
       "name": "invalid key",
+      "source": "server",
       "status": 401,
-      "body": {
-        "error": "invalid_api_key"
-      },
+      "body": { "error": "invalid_api_key" },
       "action": "shutdown"
     },
     {
       "name": "wrong scope",
+      "source": "server",
       "status": 403,
-      "body": {
-        "error": "write_scope_required"
-      },
+      "body": { "error": "write_scope_required" },
       "action": "shutdown"
     },
     {
       "name": "batch too large by count",
+      "source": "server",
       "status": 413,
-      "body": {
-        "error": "batch_too_large",
-        "max": 1000
-      },
+      "body": { "error": "batch_too_large", "max": 1000 },
       "action": "split",
       "why": "Halve and resend. An SDK that respects maxItems should never see this."
     },
     {
-      "name": "payload too large by bytes",
+      "name": "error batch too large by count",
+      "source": "server",
+      "endpoint": "/v1/errors",
       "status": 413,
-      "body": {
-        "error": "payload_too_large",
-        "max_bytes": 5242880
-      },
+      "body": { "error": "batch_too_large", "max": 50 },
+      "action": "split"
+    },
+    {
+      "name": "payload too large by bytes",
+      "source": "server",
+      "status": 413,
+      "body": { "error": "payload_too_large", "max_bytes": 5242880 },
       "action": "split",
-      "why": "Split by bytes. A single item that still will not fit is dropped after shedding what it can (breadcrumbs, then source context, then frames)."
+      "why": "Split by bytes. A single item that still will not fit is dropped as `invalid` after shedding what it can (breadcrumbs, then source context, then frames)."
     },
     {
       "name": "rate limited",
+      "source": "server",
       "status": 429,
-      "body": {
-        "error": "rate_limited"
-      },
+      "body": { "error": "rate_limited" },
+      "headers": { "Retry-After": "12", "X-RateLimit-Categories": "12:event;identify" },
       "action": "hold",
-      "holdSeconds": "escalating",
+      "wait": 12,
+      "categories": ["event", "identify"],
       "why": "Hold ONLY this endpoint's categories; a throttled analytics batch must never stall an error report."
     },
     {
-      "name": "monthly cap reached",
+      "name": "rate limited without headers",
+      "source": "proxy",
       "status": 429,
-      "body": {
-        "error": "monthly_cap_exceeded"
-      },
+      "body": { "error": "rate_limited" },
       "action": "hold",
-      "holdSeconds": 21600,
-      "why": "Retrying before the month rolls over is pure waste. Six hours, not the escalating schedule."
+      "wait": "escalating",
+      "categories": ["event", "identify"]
+    },
+    {
+      "name": "category header narrows the hold",
+      "source": "proxy",
+      "status": 429,
+      "body": { "error": "rate_limited" },
+      "headers": { "Retry-After": "20", "X-RateLimit-Categories": "20:identify" },
+      "action": "hold",
+      "wait": 20,
+      "categories": ["identify"]
+    },
+    {
+      "name": "category header cannot widen the hold",
+      "source": "proxy",
+      "status": 429,
+      "body": { "error": "rate_limited" },
+      "headers": { "Retry-After": "20", "X-RateLimit-Categories": "20:error" },
+      "action": "hold",
+      "wait": 20,
+      "categories": ["event", "identify"],
+      "why": "A batch response cannot pause error reporting."
+    },
+    {
+      "name": "category header without seconds",
+      "source": "proxy",
+      "status": 429,
+      "body": { "error": "rate_limited" },
+      "headers": { "Retry-After": "30", "X-RateLimit-Categories": ":event" },
+      "action": "hold",
+      "wait": 30,
+      "categories": ["event"],
+      "why": "A missing seconds part is not a zero wait; Retry-After still applies."
+    },
+    {
+      "name": "Retry-After as an HTTP-date",
+      "source": "proxy",
+      "status": 429,
+      "body": { "error": "rate_limited" },
+      "headers": { "Retry-After": "<<now+90s as HTTP-date>>" },
+      "action": "hold",
+      "wait": 90,
+      "categories": ["event", "identify"]
+    },
+    {
+      "name": "auth rate limited",
+      "source": "server",
+      "status": 429,
+      "body": { "error": "auth_rate_limited" },
+      "headers": { "Retry-After": "60" },
+      "action": "hold",
+      "wait": 60,
+      "categories": ["event", "identify"],
+      "why": "Per-IP, before the key is resolved, so the server names no category. Hold the endpoint's."
+    },
+    {
+      "name": "monthly cap reached, reset weeks away",
+      "source": "server",
+      "status": 429,
+      "body": { "error": "monthly_cap_exceeded" },
+      "headers": { "Retry-After": "1209600", "X-RateLimit-Categories": "1209600:event;identify" },
+      "action": "hold",
+      "wait": 21600,
+      "categories": ["event", "identify"],
+      "billing": true,
+      "why": "Hold at most six hours at a time: an upgrade mid-month should resume sending within hours. Tell the developer once."
+    },
+    {
+      "name": "monthly cap reached, reset within the hour",
+      "source": "server",
+      "status": 429,
+      "body": { "error": "monthly_cap_exceeded" },
+      "headers": { "Retry-After": "2400", "X-RateLimit-Categories": "2400:event;identify" },
+      "action": "hold",
+      "wait": 2400,
+      "categories": ["event", "identify"],
+      "billing": true,
+      "why": "Holding six hours past a reset that is forty minutes away loses nothing but delays everything."
+    },
+    {
+      "name": "monthly cap reached, no Retry-After",
+      "source": "proxy",
+      "status": 429,
+      "body": { "error": "monthly_cap_exceeded" },
+      "action": "hold",
+      "wait": 21600,
+      "categories": ["event", "identify"],
+      "billing": true
+    },
+    {
+      "name": "monthly error cap reached",
+      "source": "server",
+      "endpoint": "/v1/errors",
+      "status": 429,
+      "body": { "error": "monthly_error_cap_exceeded" },
+      "headers": { "Retry-After": "1209600", "X-RateLimit-Categories": "1209600:error" },
+      "action": "hold",
+      "wait": 21600,
+      "categories": ["error"],
+      "billing": true
     },
     {
       "name": "error valve",
+      "source": "server",
+      "endpoint": "/v1/errors",
       "status": 429,
-      "body": {
-        "error": "error_rate_limited"
-      },
+      "body": { "error": "error_rate_limited" },
+      "headers": { "Retry-After": "5", "X-RateLimit-Categories": "5:error" },
       "action": "hold",
-      "categories": [
-        "error"
-      ],
-      "holdSeconds": "escalating"
+      "wait": 5,
+      "categories": ["error"]
     },
     {
       "name": "storage unavailable",
+      "source": "server",
       "status": 503,
-      "body": {
-        "error": "storage_unavailable"
-      },
+      "body": { "error": "storage_unavailable" },
+      "headers": { "Retry-After": "10", "X-RateLimit-Categories": "10:event;identify" },
       "action": "retry",
-      "retrySeconds": 10,
-      "why": "THE BATCH WAS NOT STORED. An SDK that treats 503 as success loses data. The server sends Retry-After: 10."
+      "wait": 10,
+      "why": "THE BATCH WAS NOT STORED. An SDK that treats 503 as success loses data. Retry-After is the floor of an exponential schedule, so an outage of minutes does not use up the retry budget in seconds."
     },
     {
       "name": "gateway error",
+      "source": "proxy",
       "status": 502,
       "body": null,
       "action": "retry",
+      "wait": "escalating",
       "why": "Exponential backoff with jitter, capped, then drop and record a send_error outcome."
     },
     {
       "name": "network failure or timeout",
+      "source": "network",
       "status": 0,
       "body": null,
-      "action": "retry"
+      "action": "retry",
+      "wait": "escalating",
+      "why": "A timed-out request whose response never arrived is a failure even if the server stored it: event_id makes the resend safe."
     }
   ]
 }
