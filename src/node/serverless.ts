@@ -30,10 +30,12 @@ function vercelWaitUntil(): ((promise: Promise<unknown>) => void) | undefined {
   return typeof ctx?.waitUntil === 'function' ? ctx.waitUntil.bind(ctx) : undefined;
 }
 
+/**
+ * Variables only a function platform sets. `AWS_EXECUTION_ENV` is not one of them: ECS sets it
+ * too, and a long-running container would then wait on every flush inline.
+ */
 export function isServerlessEnvironment(env: (name: string) => string | undefined): boolean {
-  return ['FUNCTIONS_WORKER_RUNTIME', 'LAMBDA_TASK_ROOT', 'K_SERVICE', 'CF_PAGES', 'VERCEL', 'NETLIFY', 'AWS_EXECUTION_ENV'].some(
-    (name) => Boolean(env(name)),
-  );
+  return ['FUNCTIONS_WORKER_RUNTIME', 'AWS_LAMBDA_FUNCTION_NAME', 'LAMBDA_TASK_ROOT', 'K_SERVICE', 'CF_PAGES', 'VERCEL', 'NETLIFY'].some((name) => Boolean(env(name)));
 }
 
 /**

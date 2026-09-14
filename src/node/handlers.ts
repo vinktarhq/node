@@ -4,13 +4,21 @@ import type { Logger } from '../core/logger.js';
  * Process-wide handlers, installed only when asked (`captureErrors: true` or `registerHandlers()`),
  * because attaching one changes how the process behaves.
  *
+ * ## One set of listeners per process
+ *
+ * Every client registers with a single coordinator for its process, and the coordinator owns the
+ * listeners. Two clients therefore produce one exit after a crash (after both have flushed), and
+ * one re-raised signal (after both have closed), instead of the first client to finish exiting
+ * the process under the second. The coordinator lives on `globalThis`, so the CommonJS and ES
+ * module builds of this package, loaded side by side, share it too.
+ *
  * ## uncaughtException
  *
  * Node exits on an uncaught exception unless a listener exists, and the listener's existence is
  * what stops the exit. So this handler reproduces the default (print, exit 1) after a bounded
- * flush, but ONLY when it is the sole listener: if the application registered its own, it has
- * decided what the process does, and the SDK only observes. The handler is tagged so it can
- * exclude itself from that count. Worker threads never exit the process from here.
+ * flush, but ONLY when no listener outside the SDK exists: if the application registered its own,
+ * it has decided what the process does, and the SDK only observes. Worker threads never exit the
+ * process from here.
  *
  * ## unhandledRejection
  *
@@ -18,14 +26,15 @@ import type { Logger } from '../core/logger.js';
  * a listener silently switches every mode to "handled". Under `throw` (the default since 15) a
  * rejection becomes an uncaught exception, which the handler above already sees, so nothing is
  * installed. Under `strict` and `warn-with-error-code` the process semantics belong to the
- * operator and are left alone. Only `warn` and `none`, where Node would merely log, get a listener.
+ * operator and are left alone. Only where Node would merely log (`warn`, `none`) is a listener
+ * installed, and never for a client configured with `unhandledRejections: 'none'`.
  *
  * ## Signals and exit
  *
- * SIGTERM/SIGINT flush within the shutdown bound and then re-raise the signal if this was the only
- * listener, so the exit code stays what the platform expects. `beforeExit` flushes when the loop
- * drains naturally. `exit` runs the synchronous spool write and nothing else, because nothing
- * asynchronous will ever run again.
+ * SIGTERM/SIGINT close every client within the shutdown bound and then re-raise the signal if no
+ * listener outside the SDK exists, so the exit code stays what the platform expects.
+ * `beforeExit` flushes when the loop drains naturally. `exit` runs the synchronous spool writes and
+ * nothing else, because nothing asynchronous will ever run again.
  */
 export interface ProcessLike {
   on(event: string, listener: (...args: never[]) => void): unknown;
@@ -50,95 +59,172 @@ export interface HandlerOptions {
   readonly unhandledRejections: 'auto' | 'none';
 }
 
-const TAG = '__vinktar_handler__';
+export interface LifecycleOptions {
+  readonly process: ProcessLike;
+  readonly logger: Logger;
+  readonly shutdownTimeoutMs: number;
+  readonly autoFlush: boolean;
+  /** Close on SIGTERM/SIGINT. Off for an application that runs its own shutdown and calls close() itself. */
+  readonly signals?: boolean;
+  readonly flush: () => Promise<unknown>;
+  readonly close: () => Promise<unknown>;
+  readonly onExit: () => void;
+}
 
-type Tagged = ((...args: never[]) => void) & { [TAG]?: true };
+const TAG = '__vinktar_handler__';
+const REGISTRY = Symbol.for('vinktar.node.process-handlers');
+const SIGNALS = ['SIGTERM', 'SIGINT'] as const;
+
+type Listener = ((...args: never[]) => void) & { [TAG]?: true };
 
 function tag<T extends (...args: never[]) => void>(fn: T): T {
-  (fn as Tagged)[TAG] = true;
+  (fn as Listener)[TAG] = true;
 
   return fn;
 }
 
 function othersListening(process: ProcessLike, event: string): boolean {
-  return process.listeners(event).some((listener) => (listener as Tagged)[TAG] !== true && (listener as { name?: string }).name !== 'domainUncaughtExceptionClear');
+  return process.listeners(event).some((listener) => (listener as Listener)[TAG] !== true && (listener as { name?: string }).name !== 'domainUncaughtExceptionClear');
 }
 
-export function installCrashHandlers(options: HandlerOptions): () => void {
-  const { process, logger } = options;
-  const restores: Array<() => void> = [];
-  let handling = false;
+class Coordinator {
+  private readonly crash = new Set<HandlerOptions>();
+  private readonly lifecycle = new Set<LifecycleOptions>();
+  private readonly installed = new Map<string, Listener>();
+  private handling = false;
+  private warnedRejection = false;
 
-  const onUncaught = tag((error: unknown) => {
-    if (handling) return; // an error while reporting an error: let the runtime's default decide
-    handling = true;
-    options.capture(error, 'uncaughtException');
-    const exit = !othersListening(process, 'uncaughtException') && options.isMainThread;
-    void withBound(options.flush(), options.shutdownTimeoutMs).finally(() => {
-      handling = false;
+  constructor(private readonly process: ProcessLike) {}
+
+  addCrash(options: HandlerOptions): () => void {
+    this.crash.add(options);
+    this.sync(options.logger);
+
+    return () => {
+      this.crash.delete(options);
+      this.sync(options.logger);
+    };
+  }
+
+  addLifecycle(options: LifecycleOptions): () => void {
+    this.lifecycle.add(options);
+    this.sync(options.logger);
+
+    return () => {
+      this.lifecycle.delete(options);
+      this.sync(options.logger);
+    };
+  }
+
+  private sync(logger: Logger): void {
+    this.toggle('uncaughtException', this.crash.size > 0, () => tag((error: unknown, origin?: unknown) => this.onUncaught(error, origin)));
+
+    const mode = rejectionMode(this.process);
+    const wantsRejections = [...this.crash].some((options) => options.unhandledRejections !== 'none');
+    const rejectionsApply = mode === 'warn' || mode === 'none';
+    if (wantsRejections && !rejectionsApply && !this.installed.has('unhandledRejection')) {
+      logger.debug(`unhandled rejections are left to node (--unhandled-rejections=${mode}); they reach uncaughtException when fatal`);
+    }
+    this.toggle('unhandledRejection', wantsRejections && rejectionsApply, () => tag((reason: unknown) => this.onRejection(reason, mode)));
+
+    const signalled = [...this.lifecycle].some((options) => options.signals !== false);
+    for (const signal of SIGNALS) this.toggle(signal, signalled, () => tag(() => this.onSignal(signal)));
+    this.toggle('beforeExit', [...this.lifecycle].some((options) => options.autoFlush), () =>
+      tag(() => {
+        for (const options of this.lifecycle) if (options.autoFlush) void options.flush();
+      }),
+    );
+    this.toggle('exit', this.lifecycle.size > 0, () =>
+      tag(() => {
+        for (const options of this.lifecycle) {
+          try {
+            options.onExit();
+          } catch {
+            // The next client's spool still gets written.
+          }
+        }
+      }),
+    );
+  }
+
+  private toggle(event: string, wanted: boolean, make: () => Listener): void {
+    const existing = this.installed.get(event);
+    if (wanted && existing === undefined) {
+      const listener = make();
+      this.installed.set(event, listener);
+      this.process.on(event, listener);
+    } else if (!wanted && existing !== undefined) {
+      this.installed.delete(event);
+      this.process.off(event, existing);
+    }
+  }
+
+  private onUncaught(error: unknown, origin: unknown): void {
+    if (this.handling) return; // an error while reporting an error: let the runtime's default decide
+    this.handling = true;
+    const clients = [...this.crash];
+    // Under Node's default --unhandled-rejections=throw, a rejection nobody handled arrives here.
+    const mechanism = origin === 'unhandledRejection' ? 'unhandledRejection' : 'uncaughtException';
+    for (const options of clients) options.capture(error, mechanism);
+    const exit = !othersListening(this.process, 'uncaughtException') && clients.some((options) => options.isMainThread);
+    const bound = Math.max(0, ...clients.map((options) => options.shutdownTimeoutMs));
+
+    void withBound(Promise.allSettled(clients.map((options) => options.flush())), bound).finally(() => {
+      this.handling = false;
       if (exit) {
         // Node's own behaviour, reproduced: print the error and exit 1.
         console.error(error);
-        process.exit(1);
+        this.process.exit(1);
       }
     });
-  });
-  process.on('uncaughtException', onUncaught);
-  restores.push(() => process.off('uncaughtException', onUncaught));
-
-  const mode = options.unhandledRejections === 'none' ? 'none' : rejectionMode(process);
-  if (mode === 'warn' || mode === 'none') {
-    const onRejection = tag((reason: unknown) => {
-      options.capture(reason, 'unhandledRejection');
-      if (mode === 'warn' && !othersListening(process, 'unhandledRejection')) {
-        console.warn('(vinktar) UnhandledPromiseRejection:', reason);
-      }
-    });
-    process.on('unhandledRejection', onRejection);
-    restores.push(() => process.off('unhandledRejection', onRejection));
-  } else {
-    logger.debug(`unhandled rejections are left to node (--unhandled-rejections=${mode}); they reach uncaughtException when fatal`);
   }
 
-  return () => {
-    for (const restore of restores.splice(0)) restore();
-  };
+  private onRejection(reason: unknown, mode: string): void {
+    for (const options of this.crash) if (options.unhandledRejections !== 'none') options.capture(reason, 'unhandledRejection');
+    if (mode === 'warn' && !othersListening(this.process, 'unhandledRejection') && !this.warnedRejection) {
+      this.warnedRejection = true;
+      console.warn('(vinktar) UnhandledPromiseRejection:', reason);
+    }
+  }
+
+  private onSignal(signal: (typeof SIGNALS)[number]): void {
+    const clients = [...this.lifecycle].filter((options) => options.signals !== false);
+    const sole = !othersListening(this.process, signal);
+    const bound = Math.max(0, ...clients.map((options) => options.shutdownTimeoutMs));
+
+    void withBound(Promise.allSettled(clients.map((options) => options.close())), bound).finally(() => {
+      // Re-raised once, and only when nothing else is listening: the platform then sees the signal it sent.
+      if (!sole) return;
+      const listener = this.installed.get(signal);
+      if (listener !== undefined) {
+        this.installed.delete(signal);
+        this.process.off(signal, listener);
+      }
+      this.process.kill(this.process.pid, signal);
+    });
+  }
 }
 
-export function installLifecycle(options: Pick<HandlerOptions, 'process' | 'flush' | 'shutdownTimeoutMs' | 'onExit' | 'logger'> & { autoFlush: boolean; close: () => Promise<unknown> }): () => void {
-  const { process } = options;
-  const restores: Array<() => void> = [];
-
-  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-    const onSignal = tag(() => {
-      const sole = !othersListening(process, signal);
-      void withBound(options.close(), options.shutdownTimeoutMs).finally(() => {
-        // Only the last listener standing re-raises: the platform then sees the signal it sent.
-        if (sole) {
-          process.off(signal, onSignal);
-          process.kill(process.pid, signal);
-        }
-      });
-    });
-    process.on(signal, onSignal);
-    restores.push(() => process.off(signal, onSignal));
+function coordinatorFor(process: ProcessLike): Coordinator {
+  const holder = globalThis as unknown as Record<symbol, WeakMap<object, Coordinator> | undefined>;
+  const registry = (holder[REGISTRY] ??= new WeakMap<object, Coordinator>());
+  let coordinator = registry.get(process);
+  if (coordinator === undefined) {
+    coordinator = new Coordinator(process);
+    registry.set(process, coordinator);
   }
 
-  if (options.autoFlush) {
-    const onBeforeExit = tag(() => {
-      void options.flush();
-    });
-    process.on('beforeExit', onBeforeExit);
-    restores.push(() => process.off('beforeExit', onBeforeExit));
-  }
+  return coordinator;
+}
 
-  const onExit = tag(() => options.onExit());
-  process.on('exit', onExit);
-  restores.push(() => process.off('exit', onExit));
+/** Register a client's crash handling. Returns the teardown. */
+export function installCrashHandlers(options: HandlerOptions): () => void {
+  return coordinatorFor(options.process).addCrash(options);
+}
 
-  return () => {
-    for (const restore of restores.splice(0)) restore();
-  };
+/** Register a client's signal, `beforeExit` and `exit` handling. Returns the teardown. */
+export function installLifecycle(options: LifecycleOptions): () => void {
+  return coordinatorFor(options.process).addLifecycle(options);
 }
 
 /** Node's effective `--unhandled-rejections` mode: flags win over NODE_OPTIONS, last one wins. */
