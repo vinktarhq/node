@@ -32,7 +32,9 @@ export function vinktarRequest(options: RequestOptions = {}) {
 
       return;
     }
-    client.withScope((scope) => {
+    // A fresh scope per request: nothing from an earlier request, or from code outside any request,
+    // is inherited.
+    client.isolate((scope) => {
       client.scopeFromHeaders(req.headers);
       const info = describeRequest(req);
       scope.setRequest(info);
@@ -42,7 +44,10 @@ export function vinktarRequest(options: RequestOptions = {}) {
         const route = `${req.baseUrl ?? ''}${req.route?.path ?? req.path ?? ''}` || info.url?.split('?')[0] || '/';
         scope.setTag('route', route);
         if (options.trackRequests) {
-          client.track('$request', { $route: route, $method: info.method ?? 'GET', $status: res.statusCode, $duration_ms: Date.now() - started });
+          // `finish` fires from the socket, outside the request's async context: put the scope back.
+          client.within(scope, () =>
+            client.track('$request', { $route: route, $method: info.method ?? 'GET', $status: res.statusCode, $duration_ms: Date.now() - started }),
+          );
         }
       });
       next();
@@ -57,9 +62,13 @@ export function vinktarErrors(options: ErrorOptions = {}) {
     const client = options.client ?? getClient();
     if (client !== null && !wasCaptured(error) && statusOf(error, res) >= minimum) {
       markCaptured(error);
-      client.scopeFromHeaders(req.headers);
-      client.scope().setRequest(describeRequest(req));
-      client.captureException(error, { handled: false, context: { $response_status: statusOf(error, res) } });
+      // In a child scope, so an app without vinktarRequest() does not write this request into the
+      // process-wide root scope.
+      client.withScope((scope) => {
+        client.scopeFromHeaders(req.headers);
+        scope.setRequest(describeRequest(req));
+        client.captureException(error, { handled: false, context: { $response_status: statusOf(error, res) } });
+      });
     }
     next(error);
   };

@@ -19,13 +19,21 @@ export interface MinimalResponse {
 }
 
 const captured = new WeakSet<object>();
+/** Also on the error itself, so a second copy of this package in the same process sees the mark. */
+const MARK = Symbol.for('vinktar.captured');
 
 export function markCaptured(error: unknown): void {
-  if (typeof error === 'object' && error !== null) captured.add(error);
+  if (typeof error !== 'object' || error === null) return;
+  captured.add(error);
+  try {
+    Object.defineProperty(error, MARK, { value: true, enumerable: false, configurable: true });
+  } catch {
+    // A frozen error: the WeakSet still covers this copy.
+  }
 }
 
 export function wasCaptured(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && captured.has(error);
+  return typeof error === 'object' && error !== null && (captured.has(error) || (error as Record<symbol, unknown>)[MARK] === true);
 }
 
 export function describeRequest(req: MinimalRequest): RequestInfo {
