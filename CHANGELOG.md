@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+### Fixed
+
+- Every request names the library (`context.$lib` and `$lib_version`). Without it, the counts of
+  what the SDK dropped (deduplicated, sampled, refused) were stored under an empty library name,
+  so they could not be told apart from other SDKs' or filtered by version.
+
 ## 0.2.1
 
 ### Fixed
