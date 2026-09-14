@@ -28,7 +28,7 @@ import type { Spool } from './node/spool.js';
 import { NodeTransport } from './node/transport.js';
 import { makeLogger, resolve, type Environment, type Resolved, type VinktarOptions } from './options.js';
 import type { CaptureContext, EventOptions, IdentifyOptions, RequestInfo, SourceReader, User } from './types.js';
-import { VERSION } from './version.js';
+import { LIB, VERSION } from './version.js';
 
 /**
  * The client. One per process, normally reached through the facade in `index.ts` (Node) or
@@ -150,6 +150,9 @@ export class Vinktar {
       maxQueueBytes: QUEUE_BYTES,
       maxPendingErrorBytes: ERROR_QUEUE_BYTES,
       gzip: this.o.gzip,
+      // Who sent the request. The server files the client report under it, and without it every
+      // count this SDK reports lands under an empty library name.
+      context: () => ({ $lib: LIB, $lib_version: VERSION }),
       // The transport has its own deadline; this one only catches an injected fetch that ignores it.
       sendTimeoutMs: this.o.requestTimeoutMs + 1_000,
       timers: {

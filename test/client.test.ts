@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Vinktar } from '../src/client.js';
 import { nodePlatform } from '../src/index.js';
 import type { VinktarOptions } from '../src/options.js';
+import { LIB, VERSION } from '../src/version.js';
 import { makeHarness, tick, type Harness } from './harness.js';
 
 const KEY = 'vnk_sk_server_key_0001';
@@ -163,6 +164,20 @@ describe('errors', () => {
     ]);
     expect(frames[2]).toMatchObject({ context_line: 'throw here', pre_context: ['l1', 'l2'], post_context: ['l4', 'l5'] });
     expect(error!['mechanism']).toEqual({ type: 'manual', handled: true, synthetic: false });
+  });
+
+  it('names the library on every request, so its client report is filed under it', async () => {
+    const client = make();
+    client.captureMessage('same');
+    client.captureMessage('same');
+    client.track('seen');
+    expect(await client.flush()).toBe(true);
+
+    expect(harness.requests).toHaveLength(2);
+    for (const request of harness.requests) {
+      expect(request.body['context']).toEqual({ $lib: LIB, $lib_version: VERSION });
+    }
+    expect(harness.requests[0]!.body['client_report']).toEqual({ discarded: [{ reason: 'deduplicated', category: 'error', quantity: 1 }] });
   });
 
   it('dedupes and ignores', async () => {
