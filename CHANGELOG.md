@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- With `captureErrors`, an uncaught exception in a worker thread no longer leaves the thread
+  running. The error is reported and flushed, then thrown again, so the thread stops and its
+  `Worker` emits `error` exactly as it does without the SDK.
+
 ## 0.2.0
 
 State set for one request or job could reach another, one client's scope could reach another

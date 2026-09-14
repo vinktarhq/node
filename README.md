@@ -141,7 +141,9 @@ init({ writeKey, captureErrors: true });   // or registerHandlers() later
 This is opt-in because attaching a listener changes what the process does. The handler reports
 the error, flushes within `shutdownTimeout`, and then reproduces Node's default (print, exit 1),
 but **only if it is the only listener**: if you registered your own `uncaughtException` handler,
-the process is yours and the SDK only observes. Worker threads never exit the process from here.
+the process is yours and the SDK only observes. In a worker thread the handler reports and flushes,
+then throws the error again, so the thread stops and its `Worker` emits `error` as it would have
+without the SDK.
 Unhandled rejections are hooked only in Node's `warn` and `none` modes; under the default `throw`
 they already reach the exception handler and are reported as rejections, and `strict` and
 `warn-with-error-code` are left to the operator. Several clients in one process share one set of
