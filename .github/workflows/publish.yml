@@ -85,5 +85,12 @@ jobs:
           set -e
           cd "$(mktemp -d)"
           npm init -y > /dev/null
-          npm install "@vinktarhq/node@$(node -p "require('$GITHUB_WORKSPACE/package.json').version")"
+          version=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
+          # A new version takes a minute or two to reach the registry's read side after publishing,
+          # so a first "no matching version" is not a failed release. Give it five minutes.
+          for attempt in $(seq 1 20); do
+            if npm install --prefer-online "@vinktarhq/node@$version" > /dev/null 2>&1; then break; fi
+            [ "$attempt" = 20 ] && { echo "@vinktarhq/node@$version was not installable after five minutes" >&2; exit 1; }
+            sleep 15
+          done
           node -e "const m=require('@vinktarhq/node'); if(typeof m.init!=='function') process.exit(1)"
