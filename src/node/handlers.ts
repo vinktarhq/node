@@ -17,8 +17,9 @@ import type { Logger } from '../core/logger.js';
  * Node exits on an uncaught exception unless a listener exists, and the listener's existence is
  * what stops the exit. So this handler reproduces the default (print, exit 1) after a bounded
  * flush, but ONLY when no listener outside the SDK exists: if the application registered its own,
- * it has decided what the process does, and the SDK only observes. Worker threads never exit the
- * process from here.
+ * it has decided what the process does, and the SDK only observes. In a worker thread, where the
+ * default is that the thread stops and its `Worker` emits the error, the handler removes itself
+ * and throws the error again, so the thread ends the way it would have without the SDK.
  *
  * ## unhandledRejection
  *
@@ -166,16 +167,30 @@ class Coordinator {
     // Under Node's default --unhandled-rejections=throw, a rejection nobody handled arrives here.
     const mechanism = origin === 'unhandledRejection' ? 'unhandledRejection' : 'uncaughtException';
     for (const options of clients) options.capture(error, mechanism);
-    const exit = !othersListening(this.process, 'uncaughtException') && clients.some((options) => options.isMainThread);
+    const sole = !othersListening(this.process, 'uncaughtException');
+    const mainThread = clients.some((options) => options.isMainThread);
     const bound = Math.max(0, ...clients.map((options) => options.shutdownTimeoutMs));
 
     void withBound(Promise.allSettled(clients.map((options) => options.flush())), bound).finally(() => {
       this.handling = false;
-      if (exit) {
+      if (!sole) return;
+      if (mainThread) {
         // Node's own behaviour, reproduced: print the error and exit 1.
         console.error(error);
         this.process.exit(1);
+
+        return;
       }
+      // In a worker thread the default is not an exit: the thread stops and its Worker emits the
+      // error to the parent. Stepping aside and throwing the same error again is exactly that.
+      const listener = this.installed.get('uncaughtException');
+      if (listener !== undefined) {
+        this.installed.delete('uncaughtException');
+        this.process.off('uncaughtException', listener);
+      }
+      setImmediate(() => {
+        throw error;
+      });
     });
   }
 
