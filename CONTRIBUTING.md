@@ -15,6 +15,11 @@ npm test
 process handlers against a fake process, the framework adapters against hand-built requests, and
 the edge entry. It should take a few seconds and opens no socket to the outside.
 
+`test/runtimes.real.test.ts` bundles the fixtures in `test/runtimes/` from `src/` and runs them for
+real: worker threads, child processes (crash, `SIGTERM`, the spool), a cluster stopped by signal and
+by disconnect, and Cloudflare's workerd through Miniflare (Node 22 and up). Each one delivers over
+HTTP to an ingest stand-in on `127.0.0.1`.
+
 ## What the tests are for
 
 `spec/` is the wire contract the server enforces, and `test/spec.test.ts` runs every fixture in
