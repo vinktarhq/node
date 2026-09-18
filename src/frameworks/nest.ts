@@ -1,6 +1,5 @@
 import type { Vinktar } from '../client.js';
-import { getClient } from '../index.js';
-import { describeRequest, markCaptured, wasCaptured, type MinimalRequest, type MinimalResponse } from './shared.js';
+import { clientFor, describeRequest, markCaptured, quietly, wasCaptured, type MinimalRequest, type MinimalResponse } from './shared.js';
 
 /**
  * NestJS, without depending on it: a middleware class for the request scope, and an exception
@@ -33,15 +32,16 @@ export class VinktarMiddleware {
   }
 
   use(req: MinimalRequest, _res: MinimalResponse, next: Next): void {
-    const client = this.options.client ?? getClient();
-    if (client !== null) {
+    quietly('VinktarMiddleware', () => {
+      const client = clientFor(this.options);
+      if (client === null) return;
       // A fresh scope per request: nothing from an earlier request is inherited.
       const scope = client.enterScope();
       client.scopeFromHeaders(req.headers);
       const info = describeRequest(req);
       scope.setRequest(info);
       scope.setTag('http.method', info.method ?? 'GET');
-    }
+    });
     next();
   }
 }
@@ -53,22 +53,21 @@ export interface ArgumentsHostLike {
 
 /** Report an exception the way the filter does, for use inside an application's own filter. */
 export function captureNestException(exception: unknown, host: ArgumentsHostLike, options: NestOptions = {}): void {
-  const client = options.client ?? getClient();
-  const status = statusOf(exception);
-  if (client === null || wasCaptured(exception) || status < (options.minimumStatus ?? 500)) return;
-  markCaptured(exception);
-  // In a child scope, so the request is never written into the process-wide root scope.
-  client.withScope((scope) => {
-    if (isHttp(host)) {
-      try {
+  quietly('captureNestException()', () => {
+    const client = clientFor(options);
+    const status = statusOf(exception);
+    if (client === null || wasCaptured(exception) || status < (options?.minimumStatus ?? 500)) return;
+    markCaptured(exception);
+    // In a child scope, so the request is never written into the process-wide root scope.
+    client.withScope((scope) => {
+      quietly('captureNestException()', () => {
+        if (!isHttp(host)) return;
         const req = host.switchToHttp().getRequest<MinimalRequest>();
         client.scopeFromHeaders(req.headers);
         scope.setRequest(describeRequest(req));
-      } catch {
-        // No request to describe; report without it.
-      }
-    }
-    client.captureException(exception, { handled: false, context: { $response_status: status } });
+      });
+      client.captureException(exception, { handled: false, context: { $response_status: status } });
+    });
   });
 }
 
@@ -80,34 +79,47 @@ export class VinktarExceptionFilter {
 
     // Not HTTP (microservices, websockets): those transports expect the exception back.
     if (!isHttp(host)) throw exception;
-
-    const response = host.switchToHttp().getResponse<Record<string, unknown>>();
-    const { status, body } = defaultResponse(exception);
-    const adapter = this.options.httpAdapter;
-    if (adapter !== undefined) {
-      if (adapter.isHeadersSent?.(response) === true) return;
-      adapter.reply(response, body, status);
-
-      return;
-    }
-    if (response['headersSent'] === true || response['sent'] === true) return;
-    if (typeof response['status'] === 'function' && typeof response['json'] === 'function') {
-      (response['status'] as (code: number) => { json(body: unknown): unknown })(status).json(body);
-
-      return;
-    }
-    if (typeof response['code'] === 'function' && typeof response['send'] === 'function') {
-      (response['code'] as (code: number) => { send(body: unknown): unknown })(status).send(body);
-
-      return;
+    try {
+      if (this.respond(exception, host)) return;
+    } catch {
+      // The response could not be written. What goes back to Nest is its own exception, below.
     }
     // A platform this does not recognise: hand it back rather than leave the request hanging.
     throw exception;
   }
+
+  /** Writes Nest's default response. False when this is not a response it knows how to write. */
+  private respond(exception: unknown, host: ArgumentsHostLike): boolean {
+    const response = host.switchToHttp().getResponse<Record<string, unknown>>();
+    const { status, body } = defaultResponse(exception);
+    const adapter = this.options?.httpAdapter;
+    if (adapter !== undefined) {
+      if (adapter.isHeadersSent?.(response) !== true) adapter.reply(response, body, status);
+
+      return true;
+    }
+    if (response['headersSent'] === true || response['sent'] === true) return true;
+    if (typeof response['status'] === 'function' && typeof response['json'] === 'function') {
+      (response['status'] as (code: number) => { json(body: unknown): unknown })(status).json(body);
+
+      return true;
+    }
+    if (typeof response['code'] === 'function' && typeof response['send'] === 'function') {
+      (response['code'] as (code: number) => { send(body: unknown): unknown })(status).send(body);
+
+      return true;
+    }
+
+    return false;
+  }
 }
 
 function isHttp(host: ArgumentsHostLike): boolean {
-  return typeof host.getType !== 'function' || host.getType() === 'http';
+  try {
+    return typeof host.getType !== 'function' || host.getType() === 'http';
+  } catch {
+    return true;
+  }
 }
 
 /** What Nest's `BaseExceptionFilter` sends: an HttpException's own response, or a generic 500. */

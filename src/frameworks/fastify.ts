@@ -1,6 +1,5 @@
 import type { Vinktar } from '../client.js';
-import { getClient } from '../index.js';
-import { describeRequest, markCaptured, wasCaptured, type MinimalRequest } from './shared.js';
+import { clientFor, describeRequest, markCaptured, quietly, wasCaptured, type MinimalRequest } from './shared.js';
 
 /**
  * Fastify, as a plugin whose hooks return rather than wrap, so it uses `enterScope()`.
@@ -36,49 +35,56 @@ interface FastifyReply {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function vinktarFastify(instance: any, options: FastifyOptions = {}, done?: (error?: Error) => void): void {
   const app = instance as FastifyLike;
-  const minimum = options.minimumStatus ?? 500;
   const started = new WeakMap<object, number>();
 
-  app.addHook('onRequest', (request, _reply, next) => {
-    const client = options.client ?? getClient();
-    if (client !== null) {
-      const scope = client.enterScope();
-      client.scopeFromHeaders(request.headers);
-      const info = describeRequest(request);
-      scope.setRequest(info);
-      scope.setTag('http.method', info.method ?? 'GET');
-      started.set(request, Date.now());
-    }
-    next();
+  // Each hook calls `next()` with nothing, whatever happened before it: an argument there is an
+  // error, and Fastify would fail the request with it.
+  quietly('vinktarFastify', () => {
+    app.addHook('onRequest', (request, _reply, next) => {
+      quietly('vinktarFastify onRequest', () => {
+        const client = clientFor(options);
+        if (client === null) return;
+        const scope = client.enterScope();
+        client.scopeFromHeaders(request.headers);
+        const info = describeRequest(request);
+        scope.setRequest(info);
+        scope.setTag('http.method', info.method ?? 'GET');
+        started.set(request, Date.now());
+      });
+      next();
+    });
+
+    app.addHook('onError', (_request, reply, error, next) => {
+      quietly('vinktarFastify onError', () => {
+        const client = clientFor(options);
+        if (client === null || wasCaptured(error) || reply.statusCode < (options.minimumStatus ?? 500)) return;
+        markCaptured(error);
+        client.captureException(error, { handled: false, context: { $response_status: reply.statusCode } });
+      });
+      next();
+    });
+
+    app.addHook('onResponse', (request, reply, next) => {
+      quietly('vinktarFastify onResponse', () => {
+        const client = clientFor(options);
+        if (client === null) return;
+        const route = request.routeOptions?.url ?? request.routerPath ?? request.url?.split('?')[0] ?? '/';
+        client.scope().setTag('route', route);
+        if (options.trackRequests) {
+          const from = started.get(request);
+          client.track('$request', {
+            $route: route,
+            $method: (request.method ?? 'GET').toUpperCase(),
+            $status: reply.statusCode,
+            $duration_ms: from !== undefined ? Date.now() - from : Math.round(reply.elapsedTime ?? 0),
+          });
+        }
+      });
+      next();
+    });
   });
 
-  app.addHook('onError', (request, reply, error, next) => {
-    const client = options.client ?? getClient();
-    if (client !== null && !wasCaptured(error) && reply.statusCode >= minimum) {
-      markCaptured(error);
-      client.captureException(error, { handled: false, context: { $response_status: reply.statusCode } });
-    }
-    next();
-  });
-
-  app.addHook('onResponse', (request, reply, next) => {
-    const client = options.client ?? getClient();
-    if (client !== null) {
-      const route = request.routeOptions?.url ?? request.routerPath ?? request.url?.split('?')[0] ?? '/';
-      client.scope().setTag('route', route);
-      if (options.trackRequests) {
-        const from = started.get(request);
-        client.track('$request', {
-          $route: route,
-          $method: (request.method ?? 'GET').toUpperCase(),
-          $status: reply.statusCode,
-          $duration_ms: from !== undefined ? Date.now() - from : Math.round(reply.elapsedTime ?? 0),
-        });
-      }
-    }
-    next();
-  });
-
+  // Never with an error: a plugin that fails to register stops the application from starting.
   done?.();
 }
 

@@ -1,0 +1,1854 @@
+{
+  "$comment": "The never-break-the-host rule as cases. Each SDK runs every case that applies to it against its public API and asserts that every step returned, that nothing was thrown or rejected (including asynchronously, until the client has closed), and that no warning, notice or deprecation was raised on a host that treats them as fatal.",
+  "version": 1,
+  "$notes": {
+    "capability": "As in scenarios.json: common, backend, browser. A step may carry its own `capability`, and `js` means the JavaScript SDKs. A step naming a method the SDK does not have is skipped; a case with no runnable step is skipped.",
+    "hostile": "`hostile(kind)` anywhere in args or options is replaced by the SDK's own rendering of that kind (see `kinds`). Where a language has no such value, use the nearest one it has. `error(message)` is a new Error; `rejected(handled)` is a promise that rejects and whose rejection the test has already handled.",
+    "steps": "Every step must return without throwing, whatever it returns. `withScope` and `enterScope` with nested `steps` run them in the callback; with `args` the argument stands in for the callback. `scope` runs its steps on the scope object the client hands out. `withinMs` bounds how long the call may block. `request` and `requestThatThrows` go through each framework adapter the SDK ships.",
+    "options": "Merged over the test's default options. `$runtime` names a condition the test arranges before constructing the client: frozenGlobals (every global the SDK patches is frozen or non-writable), unreachableHost (every send hangs until its deadline). hooks/logger/onError/transport set to `throws` or `allThrow` are callbacks that throw every time they are called.",
+    "host": "Host functions to exercise after the steps, through whatever the SDK wrapped them with, comparing against the unwrapped behaviour: same return, same error, same synchronous-or-asynchronous failure, the original called exactly once. `fetch(invalid)` and `xhr(invalid)` call them with arguments the platform itself rejects or coerces. `errorHandler(levels)` installs a host error handler for one level before the SDK and asserts it is never called for another.",
+    "expect": "As in scenarios.json, plus `logged: {level, count}`: exactly that many lines at that level reached the configured logger."
+  },
+  "kinds": {
+    "cycle": "A plain object/array that contains itself two levels down.",
+    "throwing_accessor": "Reading or serialising it throws: a getter or Proxy trap that throws (JS); an object whose __toString and jsonSerialize throw (PHP).",
+    "self_replicating": "Its serialiser returns a fresh value with the same serialiser, forever: toJSON returning a new object with toJSON (JS); jsonSerialize returning new self (PHP).",
+    "no_json_form": "BigInt, NaN and Infinity, a symbol, a function (JS); NAN and INF, a closure, a resource (PHP), together in one object.",
+    "deep": "Plain nesting 20,000 levels deep.",
+    "huge": "A 5 MB string.",
+    "bad_text": "A string that is not valid Unicode: a lone surrogate (JS), invalid UTF-8 bytes (PHP).",
+    "null": "null / undefined.",
+    "integer": "The integer 42 where a string is expected.",
+    "object": "An empty plain object where a string or callable is expected.",
+    "list_of_null": "A list whose only element is null, where a list of patterns or strings is expected."
+  },
+  "cases": [
+    {
+      "name": "cycle as data, everywhere data is accepted",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "checkout_completed",
+            {
+              "v": "hostile(cycle)"
+            }
+          ]
+        },
+        {
+          "do": "identify",
+          "args": [
+            "user_1",
+            {
+              "v": "hostile(cycle)"
+            }
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            {
+              "v": "hostile(cycle)"
+            }
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "cart",
+            {
+              "v": "hostile(cycle)"
+            }
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "plan",
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            {
+              "message": "step",
+              "data": {
+                "v": "hostile(cycle)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "after hostile scope"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)",
+            {
+              "context": {
+                "v": "hostile(cycle)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "withScope",
+          "steps": [
+            {
+              "do": "track",
+              "args": [
+                "inside_scope"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ]
+    },
+    {
+      "name": "throwing_accessor as data, everywhere data is accepted",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "checkout_completed",
+            {
+              "v": "hostile(throwing_accessor)"
+            }
+          ]
+        },
+        {
+          "do": "identify",
+          "args": [
+            "user_1",
+            {
+              "v": "hostile(throwing_accessor)"
+            }
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            {
+              "v": "hostile(throwing_accessor)"
+            }
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "cart",
+            {
+              "v": "hostile(throwing_accessor)"
+            }
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "plan",
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            {
+              "message": "step",
+              "data": {
+                "v": "hostile(throwing_accessor)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "after hostile scope"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)",
+            {
+              "context": {
+                "v": "hostile(throwing_accessor)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "withScope",
+          "steps": [
+            {
+              "do": "track",
+              "args": [
+                "inside_scope"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ]
+    },
+    {
+      "name": "self_replicating as data, everywhere data is accepted",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "checkout_completed",
+            {
+              "v": "hostile(self_replicating)"
+            }
+          ]
+        },
+        {
+          "do": "identify",
+          "args": [
+            "user_1",
+            {
+              "v": "hostile(self_replicating)"
+            }
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            {
+              "v": "hostile(self_replicating)"
+            }
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "cart",
+            {
+              "v": "hostile(self_replicating)"
+            }
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "plan",
+            "hostile(self_replicating)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            {
+              "message": "step",
+              "data": {
+                "v": "hostile(self_replicating)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "after hostile scope"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)",
+            {
+              "context": {
+                "v": "hostile(self_replicating)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "withScope",
+          "steps": [
+            {
+              "do": "track",
+              "args": [
+                "inside_scope"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ]
+    },
+    {
+      "name": "no_json_form as data, everywhere data is accepted",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "checkout_completed",
+            {
+              "v": "hostile(no_json_form)"
+            }
+          ]
+        },
+        {
+          "do": "identify",
+          "args": [
+            "user_1",
+            {
+              "v": "hostile(no_json_form)"
+            }
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            {
+              "v": "hostile(no_json_form)"
+            }
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "cart",
+            {
+              "v": "hostile(no_json_form)"
+            }
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "plan",
+            "hostile(no_json_form)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            {
+              "message": "step",
+              "data": {
+                "v": "hostile(no_json_form)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "after hostile scope"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)",
+            {
+              "context": {
+                "v": "hostile(no_json_form)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "withScope",
+          "steps": [
+            {
+              "do": "track",
+              "args": [
+                "inside_scope"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ]
+    },
+    {
+      "name": "deep as data, everywhere data is accepted",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "checkout_completed",
+            {
+              "v": "hostile(deep)"
+            }
+          ]
+        },
+        {
+          "do": "identify",
+          "args": [
+            "user_1",
+            {
+              "v": "hostile(deep)"
+            }
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            {
+              "v": "hostile(deep)"
+            }
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "cart",
+            {
+              "v": "hostile(deep)"
+            }
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "plan",
+            "hostile(deep)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            {
+              "message": "step",
+              "data": {
+                "v": "hostile(deep)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "after hostile scope"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)",
+            {
+              "context": {
+                "v": "hostile(deep)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "withScope",
+          "steps": [
+            {
+              "do": "track",
+              "args": [
+                "inside_scope"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ]
+    },
+    {
+      "name": "huge as data, everywhere data is accepted",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "checkout_completed",
+            {
+              "v": "hostile(huge)"
+            }
+          ]
+        },
+        {
+          "do": "identify",
+          "args": [
+            "user_1",
+            {
+              "v": "hostile(huge)"
+            }
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            {
+              "v": "hostile(huge)"
+            }
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "cart",
+            {
+              "v": "hostile(huge)"
+            }
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "plan",
+            "hostile(huge)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            {
+              "message": "step",
+              "data": {
+                "v": "hostile(huge)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "after hostile scope"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)",
+            {
+              "context": {
+                "v": "hostile(huge)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "withScope",
+          "steps": [
+            {
+              "do": "track",
+              "args": [
+                "inside_scope"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ]
+    },
+    {
+      "name": "bad_text as data, everywhere data is accepted",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "checkout_completed",
+            {
+              "v": "hostile(bad_text)"
+            }
+          ]
+        },
+        {
+          "do": "identify",
+          "args": [
+            "user_1",
+            {
+              "v": "hostile(bad_text)"
+            }
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            {
+              "v": "hostile(bad_text)"
+            }
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "cart",
+            {
+              "v": "hostile(bad_text)"
+            }
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "plan",
+            "hostile(bad_text)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            {
+              "message": "step",
+              "data": {
+                "v": "hostile(bad_text)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "after hostile scope"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)",
+            {
+              "context": {
+                "v": "hostile(bad_text)"
+              }
+            }
+          ]
+        },
+        {
+          "do": "withScope",
+          "steps": [
+            {
+              "do": "track",
+              "args": [
+                "inside_scope"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ]
+    },
+    {
+      "name": "hostile data held in scope does not break a unit of work",
+      "capability": "backend",
+      "steps": [
+        {
+          "do": "setContext",
+          "args": [
+            "cart",
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            {
+              "v": "hostile(cycle)"
+            }
+          ]
+        },
+        {
+          "do": "withScope",
+          "steps": [
+            {
+              "do": "track",
+              "args": [
+                "inside_scope"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "enterScope",
+          "steps": [
+            {
+              "do": "track",
+              "args": [
+                "inside_entered_scope"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "request",
+          "note": "one request through every framework adapter the SDK ships; the application's handler must run and its response must be sent"
+        },
+        {
+          "do": "requestThatThrows",
+          "args": [
+            "app error"
+          ],
+          "note": "the application's handler throws; the framework must receive that error, not one of the SDK's"
+        }
+      ]
+    },
+    {
+      "name": "null in place of every argument",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "hostile(null)",
+            "hostile(null)",
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "page",
+          "args": [
+            "hostile(null)",
+            "hostile(null)"
+          ],
+          "capability": "js"
+        },
+        {
+          "do": "identify",
+          "args": [
+            "hostile(null)",
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "setUser",
+          "args": [
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "registerOnce",
+          "args": [
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "unregister",
+          "args": [
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "hostile(null)",
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "setTags",
+          "args": [
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "hostile(null)",
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "hostile(null)",
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "hostile(null)",
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "withScope",
+          "args": [
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "enterScope",
+          "args": [
+            "hostile(null)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "scopeFromHeaders",
+          "args": [
+            "hostile(null)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "addPendingWork",
+          "args": [
+            "hostile(null)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flushIfServerless",
+          "args": [
+            "hostile(null)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flush",
+          "args": [
+            "hostile(null)"
+          ]
+        },
+        {
+          "do": "reset",
+          "args": [
+            "hostile(null)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "integer in place of every argument",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "hostile(integer)",
+            "hostile(integer)",
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "page",
+          "args": [
+            "hostile(integer)",
+            "hostile(integer)"
+          ],
+          "capability": "js"
+        },
+        {
+          "do": "identify",
+          "args": [
+            "hostile(integer)",
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "setUser",
+          "args": [
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "registerOnce",
+          "args": [
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "unregister",
+          "args": [
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "hostile(integer)",
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "setTags",
+          "args": [
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "hostile(integer)",
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "hostile(integer)",
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "hostile(integer)",
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "withScope",
+          "args": [
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "enterScope",
+          "args": [
+            "hostile(integer)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "scopeFromHeaders",
+          "args": [
+            "hostile(integer)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "addPendingWork",
+          "args": [
+            "hostile(integer)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flushIfServerless",
+          "args": [
+            "hostile(integer)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flush",
+          "args": [
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "reset",
+          "args": [
+            "hostile(integer)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "object in place of every argument",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "hostile(object)",
+            "hostile(object)",
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "page",
+          "args": [
+            "hostile(object)",
+            "hostile(object)"
+          ],
+          "capability": "js"
+        },
+        {
+          "do": "identify",
+          "args": [
+            "hostile(object)",
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "setUser",
+          "args": [
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "registerOnce",
+          "args": [
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "unregister",
+          "args": [
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "hostile(object)",
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "setTags",
+          "args": [
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "hostile(object)",
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "hostile(object)",
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "hostile(object)",
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "withScope",
+          "args": [
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "enterScope",
+          "args": [
+            "hostile(object)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "scopeFromHeaders",
+          "args": [
+            "hostile(object)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "addPendingWork",
+          "args": [
+            "hostile(object)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flushIfServerless",
+          "args": [
+            "hostile(object)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flush",
+          "args": [
+            "hostile(object)"
+          ]
+        },
+        {
+          "do": "reset",
+          "args": [
+            "hostile(object)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "cycle in place of every argument",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "hostile(cycle)",
+            "hostile(cycle)",
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "page",
+          "args": [
+            "hostile(cycle)",
+            "hostile(cycle)"
+          ],
+          "capability": "js"
+        },
+        {
+          "do": "identify",
+          "args": [
+            "hostile(cycle)",
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "setUser",
+          "args": [
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "registerOnce",
+          "args": [
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "unregister",
+          "args": [
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "hostile(cycle)",
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "setTags",
+          "args": [
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "hostile(cycle)",
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "hostile(cycle)",
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "hostile(cycle)",
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "withScope",
+          "args": [
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "enterScope",
+          "args": [
+            "hostile(cycle)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "scopeFromHeaders",
+          "args": [
+            "hostile(cycle)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "addPendingWork",
+          "args": [
+            "hostile(cycle)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flushIfServerless",
+          "args": [
+            "hostile(cycle)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flush",
+          "args": [
+            "hostile(cycle)"
+          ]
+        },
+        {
+          "do": "reset",
+          "args": [
+            "hostile(cycle)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "throwing_accessor in place of every argument",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "hostile(throwing_accessor)",
+            "hostile(throwing_accessor)",
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "page",
+          "args": [
+            "hostile(throwing_accessor)",
+            "hostile(throwing_accessor)"
+          ],
+          "capability": "js"
+        },
+        {
+          "do": "identify",
+          "args": [
+            "hostile(throwing_accessor)",
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "setUser",
+          "args": [
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "register",
+          "args": [
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "registerOnce",
+          "args": [
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "unregister",
+          "args": [
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "setTag",
+          "args": [
+            "hostile(throwing_accessor)",
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "setTags",
+          "args": [
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "setContext",
+          "args": [
+            "hostile(throwing_accessor)",
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "addBreadcrumb",
+          "args": [
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "hostile(throwing_accessor)",
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "captureMessage",
+          "args": [
+            "hostile(throwing_accessor)",
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "withScope",
+          "args": [
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "enterScope",
+          "args": [
+            "hostile(throwing_accessor)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "scopeFromHeaders",
+          "args": [
+            "hostile(throwing_accessor)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "addPendingWork",
+          "args": [
+            "hostile(throwing_accessor)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flushIfServerless",
+          "args": [
+            "hostile(throwing_accessor)"
+          ],
+          "capability": "backend"
+        },
+        {
+          "do": "flush",
+          "args": [
+            "hostile(throwing_accessor)"
+          ]
+        },
+        {
+          "do": "reset",
+          "args": [
+            "hostile(throwing_accessor)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "the same arguments on a scope the client handed out",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "scope",
+          "steps": [
+            {
+              "do": "setUser",
+              "args": [
+                "hostile(integer)"
+              ]
+            },
+            {
+              "do": "setTag",
+              "args": [
+                "plan",
+                "hostile(integer)"
+              ]
+            },
+            {
+              "do": "setTags",
+              "args": [
+                {
+                  "a": "hostile(object)",
+                  "b": []
+                }
+              ]
+            },
+            {
+              "do": "setContext",
+              "args": [
+                "hostile(null)",
+                "hostile(cycle)"
+              ]
+            },
+            {
+              "do": "register",
+              "args": [
+                "hostile(null)"
+              ]
+            },
+            {
+              "do": "registerOnce",
+              "args": [
+                "hostile(null)"
+              ]
+            },
+            {
+              "do": "addBreadcrumb",
+              "args": [
+                "hostile(throwing_accessor)"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an integer user id is an id",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "identify",
+          "args": [
+            "hostile(integer)"
+          ]
+        },
+        {
+          "do": "track",
+          "args": [
+            "seen"
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ],
+      "expect": {
+        "sent": [
+          {
+            "endpoint": "/v1/batch",
+            "identify": {
+              "user_id": "42"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "headers with empty and non-string values",
+      "capability": "backend",
+      "steps": [
+        {
+          "do": "scopeFromHeaders",
+          "args": [
+            {
+              "x-vinktar-device": [],
+              "x-vinktar-session": [
+                null
+              ],
+              "cookie": "hostile(integer)"
+            }
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)",
+            {
+              "request": {
+                "headers": {
+                  "accept": []
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a promise handed to the SDK that rejects, already handled by the caller",
+      "capability": "backend",
+      "steps": [
+        {
+          "do": "addPendingWork",
+          "args": [
+            "rejected(handled)"
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ]
+    },
+    {
+      "name": "no key: inert, logged once, never thrown",
+      "capability": "common",
+      "options": {
+        "writeKey": null
+      },
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "ignored"
+          ]
+        },
+        {
+          "do": "identify",
+          "args": [
+            "user_1"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)"
+          ]
+        },
+        {
+          "do": "flush",
+          "returns": true
+        },
+        {
+          "do": "close",
+          "returns": true
+        }
+      ],
+      "expect": {
+        "requests": {
+          "/v1/batch": 0,
+          "/v1/errors": 0
+        },
+        "logged": {
+          "level": "error",
+          "count": 1
+        }
+      }
+    },
+    {
+      "name": "a key the SDK refuses: inert, logged once, never thrown",
+      "capability": "browser",
+      "options": {
+        "writeKey": "vnk_sk_secret"
+      },
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "ignored"
+          ]
+        },
+        {
+          "do": "flush",
+          "returns": true
+        }
+      ],
+      "expect": {
+        "requests": {
+          "/v1/batch": 0,
+          "/v1/errors": 0
+        },
+        "logged": {
+          "level": "error",
+          "count": 1
+        }
+      }
+    },
+    {
+      "name": "options that are not options",
+      "capability": "common",
+      "options": "hostile(null)",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "still_fine"
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ]
+    },
+    {
+      "name": "propagateIdentity holding a null does not reach the host's requests",
+      "capability": "common",
+      "options": {
+        "propagateIdentity": "hostile(list_of_null)"
+      },
+      "steps": [
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)"
+          ]
+        },
+        {
+          "do": "track",
+          "args": [
+            "still_fine"
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ],
+      "host": [
+        "fetch",
+        "xhr"
+      ]
+    },
+    {
+      "name": "ignoreErrors holding a null does not reach the host's requests",
+      "capability": "common",
+      "options": {
+        "ignoreErrors": "hostile(list_of_null)"
+      },
+      "steps": [
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)"
+          ]
+        },
+        {
+          "do": "track",
+          "args": [
+            "still_fine"
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ],
+      "host": [
+        "fetch",
+        "xhr"
+      ]
+    },
+    {
+      "name": "denyUrls holding a null does not reach the host's requests",
+      "capability": "common",
+      "options": {
+        "denyUrls": "hostile(list_of_null)"
+      },
+      "steps": [
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)"
+          ]
+        },
+        {
+          "do": "track",
+          "args": [
+            "still_fine"
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ],
+      "host": [
+        "fetch",
+        "xhr"
+      ]
+    },
+    {
+      "name": "redactedKeys holding a null does not reach the host's requests",
+      "capability": "common",
+      "options": {
+        "redactedKeys": "hostile(list_of_null)"
+      },
+      "steps": [
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)"
+          ]
+        },
+        {
+          "do": "track",
+          "args": [
+            "still_fine"
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ],
+      "host": [
+        "fetch",
+        "xhr"
+      ]
+    },
+    {
+      "name": "every callback throws",
+      "capability": "common",
+      "options": {
+        "hooks": "allThrow",
+        "logger": "throws",
+        "onError": "throws",
+        "transport": "throws"
+      },
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "a"
+          ]
+        },
+        {
+          "do": "identify",
+          "args": [
+            "user_1",
+            {
+              "plan": "pro"
+            }
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)"
+          ]
+        },
+        {
+          "do": "flush"
+        },
+        {
+          "do": "close"
+        }
+      ]
+    },
+    {
+      "name": "host functions behind the SDK's wrappers keep their behaviour",
+      "capability": "common",
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "a"
+          ]
+        }
+      ],
+      "host": [
+        "fetch",
+        "fetch(invalid)",
+        "xhr",
+        "xhr(invalid)",
+        "console",
+        "history",
+        "errorHandler(levels)"
+      ]
+    },
+    {
+      "name": "globals that cannot be patched",
+      "capability": "common",
+      "options": {
+        "$runtime": "frozenGlobals"
+      },
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "still_fine"
+          ]
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)"
+          ]
+        },
+        {
+          "do": "flush"
+        }
+      ],
+      "host": [
+        "fetch",
+        "console"
+      ]
+    },
+    {
+      "name": "a capture does not wait for an unreachable host",
+      "capability": "common",
+      "options": {
+        "$runtime": "unreachableHost"
+      },
+      "steps": [
+        {
+          "do": "track",
+          "args": [
+            "a"
+          ],
+          "withinMs": 250
+        },
+        {
+          "do": "captureException",
+          "args": [
+            "error(boom)"
+          ],
+          "withinMs": 250
+        }
+      ]
+    }
+  ]
+}

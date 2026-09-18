@@ -27,6 +27,12 @@ it: limits, blocked ids, the response state machine, trait parsing, stack parsin
 deterministic sampling. A number that drifts from the published one fails the build rather than
 a customer's request.
 
+`test/hostile.test.ts` runs `spec/fixtures/hostile.json`: cycles, getters that throw, `null` and
+numbers where a function belongs, globals that cannot be patched, callbacks that all throw. Every
+case runs against a client, the module-level functions and all three adapters, and fails if
+anything is thrown, rejects unhandled, or changes what the application's own `fetch`, `console`
+or error handler does.
+
 `test/api-surface.test.ts` lists the public functions by name, for the Node entry and the edge
 entry both. Adding, renaming or removing one fails until the list and the README agree with it.
 
@@ -39,8 +45,12 @@ it can pass while the published package is unusable.
 - **Zero runtime dependencies.** A test asserts it.
 - **Nothing fails silently.** Every drop, refusal and no-op is a warning that names the
   consequence, printed once and rate limited.
-- **Never throw into the application.** Every public method and every handler is wrapped. The
-  one exception is `init()` without a key, which is a misconfiguration and throws on purpose.
+- **Never throw into the application.** Every public method, every scope method, every adapter
+  hook and every handler is wrapped, and `init()` is no exception: without a key it logs one error
+  and the client is inert. A wrapper around one of the application's functions (`fetch`,
+  `console`) calls the original once with the caller's arguments and returns what it returned;
+  middleware always hands on, and an error handler hands on the application's error. A promise
+  the SDK returns resolves.
 - **Never change what the process does without being asked.** Process handlers are opt-in, and
   they defer to any listener the application registered.
 - Comments explain *why*, not *what*, and are worth writing where a rule looks arbitrary. Most of

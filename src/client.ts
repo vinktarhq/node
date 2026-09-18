@@ -5,6 +5,7 @@ import { Dedupe, KeyedValve, Valve } from './core/dedupe.js';
 import { Dispatcher } from './core/dispatcher.js';
 import { coerce, CORE_COERCERS, exceptionKey, fromMessage, isMeaningless, issueKey, type WireException } from './core/exception.js';
 import { isServerSuppressed, matches } from './core/filters.js';
+import { attempt, isObject, safeString, show } from './core/guard.js';
 import { runHooks } from './core/hooks.js';
 import { hexId, uuidv7 } from './core/ids.js';
 import {
@@ -22,11 +23,11 @@ import { baseContext, type RuntimeInfo } from './node/context.js';
 import { installCrumbSources } from './node/crumbs.js';
 import { inAppFor, shortenPath, SourceContext } from './node/frames.js';
 import { installCrashHandlers, installLifecycle, type ProcessLike } from './node/handlers.js';
-import { Scope, type AsyncLocalStorageLike, type ScopeStore } from './node/scope.js';
+import { Scope, stackScopeStore, type AsyncLocalStorageLike, type ScopeStore } from './node/scope.js';
 import { flushIfServerless, type WaitUntilContext } from './node/serverless.js';
 import type { Spool } from './node/spool.js';
 import { NodeTransport } from './node/transport.js';
-import { makeLogger, resolve, type Environment, type Resolved, type VinktarOptions } from './options.js';
+import { makeLogger, readOptions, resolve, type Environment, type Resolved, type VinktarOptions } from './options.js';
 import type { CaptureContext, EventOptions, IdentifyOptions, RequestInfo, SourceReader, User } from './types.js';
 import { VERSION } from './version.js';
 
@@ -43,6 +44,11 @@ import { VERSION } from './version.js';
  * Everything one request or job sets lives in its scope, which belongs to this client and that
  * request alone; everything configured for the service lives here. A second client in the same
  * process has scopes of its own, so nothing set through one can reach the other's project.
+ *
+ * Nothing here throws into the application: not the constructor, whatever it is handed, and not a
+ * method, whatever its arguments. Each one goes through `guarded`, and a promise it returns
+ * resolves. The one thing that passes through untouched is what the application's own callback
+ * throws inside `withScope`.
  */
 export interface ScopeStoreOptions {
   /** An `AsyncLocalStorage` class supplied by the application, for a runtime that has one but does not expose it globally. */
@@ -95,7 +101,7 @@ export class Vinktar {
   private readonly normalizeOptions: NormalizeOptions;
   private readonly inApp: (file: string) => boolean;
   private readonly context: Props;
-  private readonly spool: Spool | null;
+  private spool: Spool | null = null;
   private readonly teardowns: Array<() => void> = [];
   private source: SourceContext;
   private readSource: SourceReader;
@@ -103,12 +109,16 @@ export class Vinktar {
   private closed = false;
   private closing: Promise<boolean> | null = null;
   private handlersInstalled = false;
-  private readonly pendingWork = new Set<Promise<unknown>>();
+  private readonly pendingWork = new Set<Promise<void>>();
 
   constructor(options: VinktarOptions | string, private readonly platform: Platform) {
-    const resolvedOptions = typeof options === 'string' ? { writeKey: options } : options ?? {};
-    this.logger = makeLogger(resolvedOptions);
-    this.o = resolve(resolvedOptions, platform.environment, this.logger);
+    const read = readOptions(options);
+    this.logger = makeLogger(read.options);
+    for (const problem of read.problems) this.logger.warn(problem);
+    this.o =
+      attempt<Resolved | null>(() => resolve(read.options, platform.environment, this.logger), null, (error) =>
+        this.logger.error('the options could not be used, so nothing will be sent', { error: safeString(error) }),
+      ) ?? resolve({}, platform.environment, this.logger, 'the options could not be used');
     this.normalizeOptions = {
       maxStringBytes: this.o.maxValueBytes,
       maxDepth: this.o.normalizeDepth,
@@ -123,14 +133,18 @@ export class Vinktar {
 
     // The configured identity, if any, is the root's and nobody else's: fresh scopes and reset()
     // never bring it back.
-    this.root = new Scope(this.o.maxBreadcrumbs, this.o.initialScope);
-    this.scopes = platform.scopeStore(this.root, {
-      ...(this.o.asyncLocalStorage !== undefined ? { asyncLocalStorage: this.o.asyncLocalStorage } : {}),
-      onOverlap: () =>
-        this.logger.warn(
-          'concurrent requests are sharing one scope because this runtime exposes no AsyncLocalStorage; pass { asyncLocalStorage } (from node:async_hooks) to init() to keep them apart',
-        ),
-    });
+    this.root = new Scope(this.o.maxBreadcrumbs, this.o.initialScope, (message) => this.logger.warn(message));
+    const onOverlap = (): void =>
+      this.logger.warn(
+        'concurrent requests are sharing one scope because this runtime exposes no AsyncLocalStorage; pass { asyncLocalStorage } (from node:async_hooks) to init() to keep them apart',
+      );
+    // An `asyncLocalStorage` that cannot be constructed leaves the fallback store, not a dead client.
+    this.scopes =
+      attempt<ScopeStore | null>(
+        () => platform.scopeStore(this.root, { ...(this.o.asyncLocalStorage !== undefined ? { asyncLocalStorage: this.o.asyncLocalStorage } : {}), onOverlap }),
+        null,
+        (error) => this.logger.warn('the scope store could not be created; scopes fall back to one that concurrent requests share', { error: safeString(error) }),
+      ) ?? stackScopeStore(this.root, onOverlap);
     this.errorValve = new Valve(this.o.maxErrorsPerMinute);
     this.eventValve = new Valve(this.o.maxEventsPerMinute);
     this.typeValve = new KeyedValve(Math.max(1, Math.floor(this.o.maxErrorsPerMinute / 2)));
@@ -164,13 +178,16 @@ export class Vinktar {
       onBilling: () => this.o.onError?.(new Error('vinktar: the monthly cap was reached; events are paused')),
     });
 
-    // A disabled client touches nothing: not the network, not the process, not the spool.
-    if (this.o.inert !== null) {
-      this.spool = null;
+    // An inert client touches nothing: not the network, not the process, not the spool.
+    if (this.o.inert !== null) return;
 
-      return;
-    }
+    // Everything below reaches outside the SDK (the disk, the console, `fetch`, the process). A
+    // runtime that refuses one of them costs that feature, never the constructor.
+    this.guarded(() => this.install());
+  }
 
+  private install(): void {
+    const platform = this.platform;
     this.spool =
       this.o.spoolPath !== '' && platform.spool !== undefined
         ? platform.spool(this.o.spoolPath, this.logger, Math.floor(hashUnit(this.o.writeKey) * 0xffffffff).toString(36))
@@ -229,7 +246,7 @@ export class Vinktar {
         return;
       }
 
-      const scope = this.scopes.current();
+      const scope = this.current();
       const overrides = { userId: override(options?.userId, validUserId), deviceId: override(options?.deviceId, pickId), sessionId: override(options?.sessionId, pickId) };
       const invalid = Object.entries(overrides).filter(([, value]) => value === INVALID).map(([key]) => key);
       if (invalid.length > 0) {
@@ -260,7 +277,7 @@ export class Vinktar {
 
       const context = normalize({ ...this.context }, this.normalizeOptions);
       const payload = normalize(
-        { ...this.o.superProperties, ...scope.properties, ...(typeof properties === 'object' && properties !== null ? properties : {}) },
+        { ...this.o.superProperties, ...scope.properties, ...(isObject(properties) ? properties : {}) },
         this.normalizeOptions,
         (key, reason) => this.logger.warn(`property "${key}" on "${name}" was ${reason === 'truncated' ? 'truncated' : reason === 'depth' ? `flattened past depth ${this.o.normalizeDepth}` : 'dropped: too many properties'}`),
       );
@@ -278,7 +295,7 @@ export class Vinktar {
       const hooked = runHooks(this.o.beforeTrack, event);
       if (hooked.value === null) {
         this.drop('before_send', 'event');
-        if (hooked.threw !== undefined) this.logger.warn('beforeTrack threw; the event was dropped', { error: String(hooked.threw) });
+        if (hooked.threw !== undefined) this.logger.warn('beforeTrack threw; the event was dropped', { error: safeString(hooked.threw) });
 
         return;
       }
@@ -295,9 +312,11 @@ export class Vinktar {
   }
 
   page(name?: string, properties?: Props, options?: EventOptions): void {
-    const props: Props = { ...(properties ?? {}) };
-    if (typeof name === 'string' && name !== '') props['$page_name'] = name;
-    this.track('$pageview', props, options);
+    this.guarded(() => {
+      const props: Props = { ...(isObject(properties) ? properties : {}) };
+      if (typeof name === 'string' && name !== '') props['$page_name'] = name;
+      this.track('$pageview', props, options);
+    });
   }
 
   identify(userId: string, traits?: Traits, traitsOnce?: Traits, options?: IdentifyOptions): void {
@@ -305,21 +324,21 @@ export class Vinktar {
       if (!this.ready('identify')) return;
       const id = validUserId(userId);
       if (id === null) {
-        this.logger.warn(`identify(${JSON.stringify(userId)}) was ignored: not a usable user id`);
+        this.logger.warn(`identify(${show(userId)}) was ignored: not a usable user id`);
 
         return;
       }
       const device = override(options?.deviceId, pickId);
       if (device === INVALID) {
         this.drop('invalid', 'identify');
-        this.logger.warn(`identify("${id}") was ignored: deviceId ${JSON.stringify(options?.deviceId)} is not a usable id`);
+        this.logger.warn(`identify("${id}") was ignored: deviceId ${show(options?.deviceId)} is not a usable id`);
 
         return;
       }
       const parsed = parseTraits({ $set: traits, $set_once: traitsOnce, $unset: options?.unset });
       for (const drop of parsed.drops) this.logger.warn(describeTraitDrop(drop));
 
-      const scope = this.scopes.current();
+      const scope = this.current();
       scope.setUser(id);
       // A deviceId given here links that device for this call; it does not become the scope's.
       const deviceId = device ?? scope.deviceId;
@@ -357,7 +376,7 @@ export class Vinktar {
 
   private withUser(method: string, fn: (id: string) => void): void {
     this.guarded(() => {
-      const id = this.scopes.current().userId;
+      const id = this.current().userId;
       if (id === undefined) {
         this.logger.warn(`${method}() was called with no user on the scope; call identify() first, so nothing was sent`);
 
@@ -375,11 +394,11 @@ export class Vinktar {
   setUser(user: User | null): void {
     this.guarded(() => {
       if (user === null) {
-        this.scopes.current().setUser(undefined);
+        this.current().setUser(undefined);
 
         return;
       }
-      if (typeof user !== 'object' || typeof user.id !== 'string') {
+      if (!isObject(user) || typeof user.id !== 'string') {
         this.logger.warn('setUser() needs { id } or null');
 
         return;
@@ -395,24 +414,20 @@ export class Vinktar {
    * is never restored, and nothing is flushed or dropped from the queue.
    */
   reset(): void {
-    this.guarded(() => this.scopes.current().reset(this.defaults()));
+    this.guarded(() => this.current().reset(this.defaults()));
   }
 
   /** Properties sent on this scope's analytics events, and on nothing else. */
   register(properties: Props): void {
-    this.guarded(() => {
-      if (typeof properties === 'object' && properties !== null) this.scopes.current().register(properties);
-    });
+    this.guarded(() => this.current().register(properties));
   }
 
   registerOnce(properties: Props): void {
-    this.guarded(() => {
-      if (typeof properties === 'object' && properties !== null) this.scopes.current().registerOnce(properties);
-    });
+    this.guarded(() => this.current().registerOnce(properties));
   }
 
   unregister(key: string): void {
-    this.guarded(() => this.scopes.current().unregister(key));
+    this.guarded(() => this.current().unregister(key));
   }
 
   // Errors --------------------------------------------------------------------------------------
@@ -424,7 +439,7 @@ export class Vinktar {
   captureMessage(message: string, hint?: CaptureContext): string {
     return this.guarded(() => {
       if (!this.ready('captureMessage')) return '';
-      const text = typeof message === 'string' ? message : String(message);
+      const text = typeof message === 'string' ? message : safeString(message);
       let frames = this.o.attachStacktrace ? parseStack(new Error().stack, { inApp: this.inApp }) : [];
       if (frames.length > 2) frames = frames.slice(0, -2); // this method and the facade
       const exceptions = fromMessage(text, frames);
@@ -474,11 +489,11 @@ export class Vinktar {
       return '';
     }
 
-    const scope = this.scopes.current();
+    const scope = this.current();
     const explicit = override(hint.userId, validUserId);
     // An unusable explicit user is not replaced by the scope's: the error still goes, with no identity.
     const anonymous = explicit === INVALID;
-    if (anonymous) this.logger.warn(`userId ${JSON.stringify(hint.userId)} is not a usable id; the error is sent with no identity rather than as someone else`);
+    if (anonymous) this.logger.warn(`userId ${show(hint.userId)} is not a usable id; the error is sent with no identity rather than as someone else`);
     const userId = anonymous ? undefined : ((explicit as string | undefined) ?? scope.userId);
     const deviceId = anonymous ? undefined : scope.deviceId;
     const sessionId = anonymous ? undefined : scope.sessionId;
@@ -530,13 +545,13 @@ export class Vinktar {
     const request = this.requestBlock(scope.request);
     if (request !== null) event['request'] = request;
     if (Array.isArray(hint.fingerprint) && hint.fingerprint.length > 0) {
-      event['fingerprint'] = hint.fingerprint.slice(0, MAX_FINGERPRINT_PARTS).map((part) => truncateToBytes(String(part), MAX_FINGERPRINT_PART_BYTES));
+      event['fingerprint'] = hint.fingerprint.slice(0, MAX_FINGERPRINT_PARTS).map((part) => truncateToBytes(safeString(part), MAX_FINGERPRINT_PART_BYTES));
     }
 
     const hooked = runHooks(this.o.beforeSend, event);
     if (hooked.value === null) {
       this.drop('before_send', 'error');
-      if (hooked.threw !== undefined) this.logger.warn('beforeSend threw; the error was dropped', { error: String(hooked.threw) });
+      if (hooked.threw !== undefined) this.logger.warn('beforeSend threw; the error was dropped', { error: safeString(hooked.threw) });
 
       return '';
     }
@@ -585,36 +600,42 @@ export class Vinktar {
       if (shaped === null) return;
       const hooked = runHooks(this.o.beforeBreadcrumb, shaped);
       if (hooked.value === null) return;
-      this.scopes.current().addBreadcrumb(hooked.value);
+      // Already shaped, and the hooks have had their say: straight into the trail.
+      this.current().breadcrumbs.add(hooked.value);
     });
   }
 
   setTag(key: string, value: string): void {
-    this.guarded(() => this.scopes.current().setTag(key, value));
+    this.guarded(() => this.current().setTag(key, value));
   }
 
   setTags(tags: Record<string, string>): void {
-    this.guarded(() => this.scopes.current().setTags(tags));
+    this.guarded(() => this.current().setTags(tags));
   }
 
   setContext(context: Props | null): void {
-    this.guarded(() => this.scopes.current().setContext(context));
+    this.guarded(() => this.current().setContext(context));
   }
 
   /** The scope for the current async context. */
   scope(): Scope {
-    return this.scopes.current();
+    return this.current();
   }
 
   /**
    * Run `work` in a child of the current scope: it starts as a copy, and changes made inside stay
    * inside. Returns what `work` returns and lets what it throws through, unreported. Async work
-   * keeps the scope until it settles.
+   * keeps the scope until it settles. Anything but a function is refused with a warning, and the
+   * call returns `undefined`.
    */
   withScope<T>(work: (scope: Scope) => T): T {
-    const child = this.scopes.current().fork();
+    if (typeof work !== 'function') {
+      this.logger.warn(`withScope() needs a function to run, not ${show(work)}; nothing was run`);
 
-    return this.scopes.run(child, () => work(child));
+      return undefined as T;
+    }
+
+    return this.runIn(this.guarded(() => this.current().fork(), null) ?? this.blankScope(), work);
   }
 
   /**
@@ -625,21 +646,43 @@ export class Vinktar {
    */
   enterScope(): Scope {
     const fresh = this.freshScope();
-    this.scopes.enter(fresh);
+    this.guarded(() => this.scopes.enter(fresh));
 
     return fresh;
   }
 
   /** @internal Run `work` in a fresh scope: the request boundary for adapters that wrap the handler. */
   isolate<T>(work: (scope: Scope) => T): T {
-    const fresh = this.freshScope();
-
-    return this.scopes.run(fresh, () => work(fresh));
+    return this.runIn(this.freshScope(), work);
   }
 
   /** @internal Run `work` with a scope an adapter already holds made current again. */
   within<T>(scope: Scope, work: () => T): T {
-    return this.scopes.run(scope, work);
+    return this.runIn(scope, work);
+  }
+
+  /**
+   * `work` inside `scope`, with the two kept apart: what `work` throws is the application's and
+   * leaves exactly as thrown, and a store that fails before or after it is the SDK's, reported,
+   * with `work` still run (once) and its result still returned.
+   */
+  private runIn<T>(scope: Scope, work: (scope: Scope) => T): T {
+    let state: 'before' | 'inside' | 'after' = 'before';
+    let result: T | undefined;
+    try {
+      return this.scopes.run(scope, () => {
+        state = 'inside';
+        result = work(scope);
+        state = 'after';
+
+        return result;
+      });
+    } catch (error) {
+      if ((state as string) === 'inside') throw error;
+      this.failed(error);
+
+      return (state as string) === 'after' ? (result as T) : work(scope);
+    }
   }
 
   /**
@@ -649,8 +692,19 @@ export class Vinktar {
    * correlation, never authentication.
    */
   scopeFromHeaders(headers: Record<string, string | string[] | undefined> | Headers | undefined): Scope {
-    const scope = this.scopes.current();
-    if (headers === undefined || headers === null) return scope;
+    const scope = this.current();
+    this.guarded(() => this.adoptHeaders(scope, headers));
+
+    return scope;
+  }
+
+  private adoptHeaders(scope: Scope, headers: Record<string, string | string[] | undefined> | Headers | undefined): void {
+    if (headers === undefined || headers === null) return;
+    if (typeof headers !== 'object') {
+      this.logger.warn(`scopeFromHeaders() needs the request's headers, not ${show(headers)}; no identity was adopted`);
+
+      return;
+    }
     const read = (name: string): string | undefined => {
       let value: unknown;
       if (typeof (headers as Headers).get === 'function') value = (headers as Headers).get(name) ?? undefined;
@@ -663,8 +717,6 @@ export class Vinktar {
     const session = read('x-vinktar-session-id');
     if (device !== undefined) scope.deviceId = device;
     if (session !== undefined) scope.sessionId = session;
-
-    return scope;
   }
 
   /** Install the process-wide handlers for uncaught exceptions and unhandled rejections. */
@@ -696,11 +748,12 @@ export class Vinktar {
   /** Replace how source files are read for context lines. */
   setSourceReader(reader: SourceReader): void {
     if (typeof reader === 'function') this.readSource = reader;
+    else this.logger.warn('setSourceReader() needs a function; the reader was not changed');
   }
 
   /** Get the queue out of a function that is about to be frozen. See `serverless.ts`. */
   flushIfServerless(options: { context?: WaitUntilContext | undefined; timeoutMs?: number } = {}): Promise<void> {
-    return flushIfServerless(() => this.flush(), options, this.platform.environment.env);
+    return flushIfServerless(() => this.flush(), options, this.platform.environment.env, (error) => this.failed(error));
   }
 
   // Lifecycle -----------------------------------------------------------------------------------
@@ -713,7 +766,11 @@ export class Vinktar {
     if (this.o.inert !== null) return Promise.resolve(true);
     if (this.closing !== null) return this.closing;
 
-    return this.flushNow();
+    return this.flushNow().catch((error: unknown) => {
+      this.failed(error);
+
+      return false;
+    });
   }
 
   /**
@@ -725,7 +782,11 @@ export class Vinktar {
   close(): Promise<boolean> {
     if (this.closing === null) {
       this.closed = true;
-      this.closing = this.shutdown();
+      this.closing = this.shutdown().catch((error: unknown) => {
+        this.failed(error);
+
+        return false;
+      });
     }
 
     return this.closing;
@@ -733,8 +794,22 @@ export class Vinktar {
 
   /** Register work `close()` and `flush()` should wait for (a capture in a middleware that runs after the response). */
   addPendingWork(promise: Promise<unknown>): void {
-    this.pendingWork.add(promise);
-    void promise.finally(() => this.pendingWork.delete(promise));
+    this.guarded(() => {
+      if (typeof promise?.then !== 'function') {
+        this.logger.warn(`addPendingWork() needs a promise, not ${show(promise)}; nothing will be waited for`);
+
+        return;
+      }
+      // Only that it settled matters here. How it settled is the caller's business: a promise
+      // derived from theirs that rejected with nobody listening would be an unhandled rejection
+      // the application never wrote.
+      const settled = Promise.resolve(promise).then(
+        () => {},
+        () => {},
+      );
+      this.pendingWork.add(settled);
+      void settled.then(() => this.pendingWork.delete(settled));
+    });
   }
 
   // Internals -----------------------------------------------------------------------------------
@@ -744,7 +819,7 @@ export class Vinktar {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    if (this.pendingWork.size > 0) await withBound(Promise.allSettled([...this.pendingWork]), this.o.shutdownTimeout);
+    if (this.pendingWork.size > 0) await withBound(Promise.all([...this.pendingWork]), this.o.shutdownTimeout);
     const ok = await this.dispatcher.flush();
     if (!this.platform.deferred && this.closing === null && !this.dispatcher.isStopped) {
       if (this.dispatcher.pending > 0) this.scheduleFlush(Math.max(this.dispatcher.nextRetryIn(), this.o.flushIntervalMs));
@@ -802,7 +877,20 @@ export class Vinktar {
 
   /** What a request starts from: the process scope's tags, context and properties, and no actor. */
   private freshScope(): Scope {
-    return this.root.detached();
+    return this.guarded(() => this.root.detached(), null) ?? this.blankScope();
+  }
+
+  private blankScope(): Scope {
+    return new Scope(this.o.maxBreadcrumbs, undefined, (message) => this.logger.warn(message));
+  }
+
+  /** The scope of the current async context, or the root when the store cannot say. */
+  private current(): Scope {
+    try {
+      return this.scopes.current();
+    } catch {
+      return this.root;
+    }
   }
 
   private defaults(): { tags: Record<string, string>; context: Props } {
@@ -899,18 +987,17 @@ export class Vinktar {
     return out;
   }
 
+  /** Every public method's body runs in here. Whatever it throws is reported and the caller gets `fallback`. */
   private guarded<T>(fn: () => T, fallback?: T): T {
-    try {
-      return fn();
-    } catch (error) {
-      this.logger.error('internal failure', { error: String(error) });
-      try {
-        this.o.onError?.(error instanceof Error ? error : new Error(String(error)));
-      } catch {
-        // The customer's handler threw. Nothing more can be done about that here.
-      }
+    return attempt(fn, fallback as T, (error) => this.failed(error));
+  }
 
-      return fallback as T;
+  private failed(error: unknown): void {
+    this.logger.error('internal failure', { error: safeString(error) });
+    try {
+      this.o.onError?.(error instanceof Error ? error : new Error(safeString(error)));
+    } catch {
+      // The customer's handler threw. Nothing more can be done about that here.
     }
   }
 }

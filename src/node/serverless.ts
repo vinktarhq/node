@@ -8,7 +8,8 @@
  *
  * A flush handed to `waitUntil` never rejects: on some platforms a rejected `waitUntil` promise
  * marks the whole invocation as failed, even though the handler itself succeeded, and the SDK's
- * housekeeping must never fail a customer's request.
+ * housekeeping must never fail a customer's request. The promise returned to the handler never
+ * rejects either, whatever the options were and whatever the platform's `waitUntil` did.
  */
 export interface WaitUntilContext {
   waitUntil(promise: Promise<unknown>): void;
@@ -46,22 +47,40 @@ export async function flushIfServerless(
   flush: () => Promise<unknown>,
   options: FlushIfServerlessOptions,
   env: (name: string) => string | undefined,
+  onFailure: (error: unknown) => void = () => {},
 ): Promise<void> {
-  const timeout = options.timeoutMs ?? 2000;
-  const bounded = (): Promise<void> => withTimeout(flush(), timeout).then(() => undefined, () => undefined);
+  // One flush, started at most once, that settles either way: it is handed to the platform, and
+  // awaited here when the platform will not take it.
+  let started: Promise<void> | undefined;
+  const bounded = (timeout: number): Promise<void> => (started ??= withTimeout(flush(), timeout).then(() => undefined, () => undefined));
 
-  if (typeof options.context?.waitUntil === 'function') {
-    options.context.waitUntil(bounded());
+  try {
+    const given = typeof options === 'object' && options !== null ? options : {};
+    const timeout = typeof given.timeoutMs === 'number' && given.timeoutMs >= 0 ? given.timeoutMs : 2000;
+    const context = given.context;
+    const waitUntil = typeof context?.waitUntil === 'function' ? context.waitUntil.bind(context) : vercelWaitUntil();
+    if (waitUntil !== undefined) {
+      try {
+        waitUntil(bounded(timeout));
 
-    return;
+        return;
+      } catch (error) {
+        // The platform refused the promise (the response has already gone, on some). Wait for it here.
+        onFailure(error);
+        await bounded(timeout);
+
+        return;
+      }
+    }
+    if (isServerlessEnvironment(env)) await bounded(timeout);
+  } catch (error) {
+    // The options could not be read. This promise resolves regardless: a handler awaits it.
+    try {
+      onFailure(error);
+    } catch {
+      // Nothing left to tell.
+    }
   }
-  const vercel = vercelWaitUntil();
-  if (vercel !== undefined) {
-    vercel(bounded());
-
-    return;
-  }
-  if (isServerlessEnvironment(env)) await bounded();
 }
 
 export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {

@@ -1,3 +1,5 @@
+import { toPatterns } from './core/filters.js';
+import { isObject, readOptions as readKnown, safeString } from './core/guard.js';
 import { toHookList } from './core/hooks.js';
 import { MAX_DEPTH, MAX_STRING_BYTES } from './core/limits.js';
 import { consoleSink, Logger, type LogSink } from './core/logger.js';
@@ -8,9 +10,10 @@ import type { CrumbHook, EventHook } from './types.js';
 /**
  * Everything `init()` accepts. Numbers are clamped with a warning rather than taken verbatim.
  *
- * Unlike the browser, a missing key here is a thrown `TypeError`: a server process with no key
- * is misconfigured, not a visitor who has not consented, and a silent no-op would be found in a
- * dashboard weeks later rather than in the first deploy's logs.
+ * Nothing here throws, a missing key included. A server process with no key is misconfigured, and
+ * it is told so once, at error level, in the first deploy's logs; then the client is inert, exactly
+ * as if it had been switched off. Taking the service down over its analytics key would be the SDK
+ * breaking the application, which is the one thing it must never do.
  */
 export interface VinktarOptions {
   /** The project's write key. Falls back to `VINKTAR_KEY`. */
@@ -172,22 +175,36 @@ const KNOWN = new Set<keyof VinktarOptions>([
   'fetch', 'asyncLocalStorage',
 ]);
 
+/** What `init()` was handed, as options that are safe to read. A bare string is the write key. */
+export function readOptions(given: unknown): { options: VinktarOptions; problems: string[] } {
+  return typeof given === 'string' ? { options: { writeKey: given }, problems: [] } : readKnown(given, KNOWN);
+}
+
 export function makeLogger(options: VinktarOptions): Logger {
   const sink: LogSink = typeof options.logger === 'function' ? options.logger : consoleSink(console);
 
   return new Logger(sink, options.debug === true);
 }
 
-export function resolve(options: VinktarOptions, environment: Environment, logger: Logger): Resolved {
+/**
+ * @param options what `readOptions` returned, never what the application passed
+ * @param broken set when the options could not be resolved at all: the client is inert for that reason
+ */
+export function resolve(options: VinktarOptions, environment: Environment, logger: Logger, broken?: string): Resolved {
   const warnings: string[] = [];
   const warn = (message: string): void => {
     warnings.push(message);
     logger.warn(message);
   };
+  const env = (name: string): string | undefined => {
+    try {
+      const value = environment.env(name);
 
-  for (const key of Object.keys(options)) {
-    if (!KNOWN.has(key as keyof VinktarOptions)) warn(`unknown option "${key}" was ignored`);
-  }
+      return typeof value === 'string' ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  };
 
   const clamp = (name: string, value: unknown, min: number, max: number, fallback: number): number => {
     if (value === undefined) return fallback;
@@ -215,26 +232,35 @@ export function resolve(options: VinktarOptions, environment: Environment, logge
 
     return value as T[];
   };
+  /** Strings only: `String(null)` in a list of key fragments would redact every key containing "null". */
+  const strings = (name: string, value: unknown): string[] =>
+    list<unknown>(name, value).filter((entry, index): entry is string => {
+      if (typeof entry !== 'string') warn(`${name}[${index}] is not a string and was dropped`);
+
+      return typeof entry === 'string';
+    });
+  const patterns = (name: string, value: unknown): Array<string | RegExp> =>
+    toPatterns(list(name, value), (index) => warn(`${name}[${index}] is not a string or a RegExp and was dropped`));
   const hooks = <T>(name: string, value: T | T[] | undefined): T[] =>
     toHookList(value as never, (index) => warn(`${name}[${index}] is not a function and was dropped`)) as T[];
   const text = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value.trim() : fallback);
 
   const enabled = options.enabled ?? true;
-  const writeKey = text(options.writeKey ?? options.key ?? environment.env('VINKTAR_KEY'));
-  // A client switched off on purpose needs no key; one that is meant to send and has none is a
-  // deployment mistake, said once at startup where someone is looking.
-  if (writeKey === '' && enabled) {
-    throw new TypeError('[vinktar] no write key: pass { writeKey } to init() or set VINKTAR_KEY');
-  }
+  const writeKey = text(options.writeKey ?? options.key ?? env('VINKTAR_KEY'));
   if (writeKey !== '' && !writeKey.startsWith('vnk_pk_') && !writeKey.startsWith('vnk_sk_')) {
     warn('the write key does not look like a Vinktar key (vnk_pk_… or vnk_sk_…)');
   }
 
-  let inert: string | null = null;
-  if (!enabled) inert = 'enabled is false';
+  let inert: string | null = broken ?? null;
+  if (!enabled) inert ??= 'enabled is false';
+  // A client switched off on purpose needs no key. One that is meant to send and has none is a
+  // deployment mistake: said once, at error level, where someone is looking, and then the client
+  // is as inert as a disabled one.
+  const keyless = inert === null && writeKey === '';
+  if (keyless) inert = 'no write key';
 
-  const environmentName = text(options.environment) || text(environment.env('VINKTAR_ENVIRONMENT')) || text(environment.env('NODE_ENV')) || 'production';
-  const enabledEnvironments = list<string>('enabledEnvironments', options.enabledEnvironments).map(String);
+  const environmentName = text(options.environment) || text(env('VINKTAR_ENVIRONMENT')) || text(env('NODE_ENV')) || 'production';
+  const enabledEnvironments = strings('enabledEnvironments', options.enabledEnvironments);
   if (enabledEnvironments.length > 0 && !enabledEnvironments.includes(environmentName)) {
     inert ??= `environment "${environmentName}" is not in enabledEnvironments`;
   }
@@ -246,25 +272,25 @@ export function resolve(options: VinktarOptions, environment: Environment, logge
     maxQueueSize = flushAt;
   }
   const crumbs = options.breadcrumbs ?? true;
-  const initial = options.initialScope ?? {};
+  const initial = isObject(options.initialScope) ? options.initialScope : {};
 
   const resolved: Resolved = {
     writeKey,
-    host: normalizeHost(options.host ?? environment.env('VINKTAR_HOST'), warn),
+    host: normalizeHost(options.host ?? env('VINKTAR_HOST'), warn),
     enabled,
     debug: options.debug === true,
     analytics: options.analytics ?? true,
     errors: options.errors ?? true,
-    release: text(options.release) || text(environment.env('VINKTAR_RELEASE')),
+    release: text(options.release) || text(env('VINKTAR_RELEASE')),
     environment: environmentName,
     enabledEnvironments,
-    serverName: text(options.serverName) || environment.hostname(),
+    serverName: text(options.serverName) || from(environment.hostname),
     initialScope: {
       ...(typeof initial.userId === 'string' ? { userId: initial.userId } : {}),
       ...(typeof initial.deviceId === 'string' ? { deviceId: initial.deviceId } : {}),
       ...(typeof initial.sessionId === 'string' ? { sessionId: initial.sessionId } : {}),
-      tags: { ...(initial.tags ?? {}) },
-      context: { ...(initial.context ?? {}) },
+      tags: isObject(initial.tags) ? { ...initial.tags } : {},
+      context: isObject(initial.context) ? { ...initial.context } : {},
     },
     flushAt,
     flushIntervalMs: clamp('flushIntervalMs', options.flushIntervalMs, 100, 300_000, 10_000),
@@ -284,16 +310,16 @@ export function resolve(options: VinktarOptions, environment: Environment, logge
     maxErrorsPerMinute: clamp('maxErrorsPerMinute', options.maxErrorsPerMinute, 1, 10_000, 100),
     maxEventsPerMinute: clamp('maxEventsPerMinute', options.maxEventsPerMinute, 1, 600_000, 6000),
     dedupe: options.dedupe ?? true,
-    ignoreErrors: list('ignoreErrors', options.ignoreErrors),
-    superProperties: typeof options.superProperties === 'object' && options.superProperties !== null ? options.superProperties : {},
+    ignoreErrors: patterns('ignoreErrors', options.ignoreErrors),
+    superProperties: isObject(options.superProperties) ? options.superProperties : {},
     sendDefaultPii: options.sendDefaultPii ?? false,
-    redactedKeys: list<string>('redactedKeys', options.redactedKeys).map(String),
-    propertyDenylist: list<string>('propertyDenylist', options.propertyDenylist).map(String),
+    redactedKeys: strings('redactedKeys', options.redactedKeys),
+    propertyDenylist: strings('propertyDenylist', options.propertyDenylist),
     maxValueBytes: clamp('maxValueBytes', options.maxValueBytes, 16, MAX_STRING_BYTES, MAX_STRING_BYTES),
     normalizeDepth: clamp('normalizeDepth', options.normalizeDepth, 1, MAX_DEPTH, MAX_DEPTH),
     includeRawStack: options.includeRawStack ?? false,
     attachStacktrace: options.attachStacktrace ?? false,
-    projectRoot: text(options.projectRoot) || environment.cwd(),
+    projectRoot: text(options.projectRoot) || from(environment.cwd),
     contextLines: clamp('contextLines', options.contextLines, 0, 20, 5),
     beforeSend: hooks('beforeSend', options.beforeSend),
     beforeTrack: hooks('beforeTrack', options.beforeTrack),
@@ -305,14 +331,26 @@ export function resolve(options: VinktarOptions, environment: Environment, logge
     warnings,
   };
 
-  if (inert !== null) logger.warn(`inert: ${inert}`);
+  if (keyless) logger.error('no write key: pass { writeKey } to init() or set VINKTAR_KEY. Nothing will be sent until there is one');
+  else if (inert !== null) logger.warn(`inert: ${inert}`);
 
   return resolved;
 }
 
+/** What the runtime says about itself, or nothing: `process.cwd()` throws when the directory is gone. */
+function from(read: () => string): string {
+  try {
+    const value = read();
+
+    return typeof value === 'string' ? value : '';
+  } catch {
+    return '';
+  }
+}
+
 function normalizeHost(host: unknown, warn: (m: string) => void): string {
   if (host === undefined || host === '') return DEFAULT_HOST;
-  const text = String(host).trim().replace(/\/+$/, '');
+  const text = safeString(host).trim().replace(/\/+$/, '');
   if (!/^https?:\/\//.test(text)) {
     warn(`host "${text}" is not an http(s) URL; using ${DEFAULT_HOST}`);
 

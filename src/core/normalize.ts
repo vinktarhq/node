@@ -32,6 +32,20 @@ export const DEFAULT_NORMALIZE: NormalizeOptions = {
 export type Props = Record<string, unknown>;
 
 export const REDACTED = '[redacted]';
+/** A value that threw when it was read: a getter, or a Proxy trap. */
+export const UNREADABLE = '[Unreadable]';
+export const CIRCULAR = '[Circular]';
+
+/**
+ * Values visited in one call, arrays and objects and everything in them. Depth alone does not
+ * bound the work: an object three levels deep can still hold a million keys, and the walk runs on
+ * the application's thread, inside its `track()` call.
+ */
+export const MAX_NODES = 10_000;
+
+interface Budget {
+  nodes: number;
+}
 
 const SENSITIVE = /pass|token|secret|auth|api[-_]?key|cookie|credential|card|cvv|ssn/i;
 
@@ -58,9 +72,10 @@ export function normalize(
   onDrop?: (key: string, reason: DropReason) => void,
 ): Props {
   const out: Props = {};
+  const budget: Budget = { nodes: MAX_NODES };
   let count = 0;
 
-  for (const key of Object.keys(props)) {
+  for (const key of keysOf(props)) {
     if (isUnsafeKey(key)) continue;
     if (count >= options.maxProperties) {
       onDrop?.(key, 'too_many_properties');
@@ -71,30 +86,64 @@ export function normalize(
     // is. Exact name, top level only: a nested key of the same name survives.
     if (options.propertyDenylist?.includes(key)) continue;
 
-    const value = props[key];
-    if (value === undefined) continue;
-
     // A fresh Set per top-level property, tracking the current PATH rather than everything seen: a
     // DAG (the same object referenced twice as siblings) is not a cycle.
-    out[key] = visit(key, value, 1, options, new Set(), onDrop);
+    const value = visit(key, () => props[key], 1, options, new Set(), budget, onDrop);
+    if (value === undefined) continue;
+    out[key] = value;
     count += 1;
   }
 
   return out;
 }
 
+/** The keys of something that may refuse to list them. */
+function keysOf(value: unknown): string[] {
+  try {
+    return typeof value === 'object' && value !== null ? Object.keys(value) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * `read` rather than the value: reading a property is the first thing that can throw (a getter, a
+ * Proxy), and everything after it asks the value questions that can throw as well (`instanceof`
+ * consults a Proxy's prototype trap). One `try` around all of it, so the worst a value can do is
+ * be recorded as unreadable.
+ */
 function visit(
+  key: string,
+  read: () => unknown,
+  depth: number,
+  options: NormalizeOptions,
+  path: Set<unknown>,
+  budget: Budget,
+  onDrop?: (key: string, reason: DropReason) => void,
+): unknown {
+  try {
+    return shape(key, read(), depth, options, path, budget, onDrop);
+  } catch {
+    return UNREADABLE;
+  }
+}
+
+function shape(
   key: string,
   value: unknown,
   depth: number,
   options: NormalizeOptions,
   path: Set<unknown>,
+  budget: Budget,
   onDrop?: (key: string, reason: DropReason) => void,
 ): unknown {
+  if (value === undefined) return undefined;
   if (isSensitiveKey(key, options.redactedKeys)) return REDACTED;
+  budget.nodes -= 1;
 
   if (typeof value === 'string') {
-    if (byteLength(value) > options.maxStringBytes) onDrop?.(key, 'truncated');
+    // Bytes are never fewer than UTF-16 units, so a long string is over without being encoded.
+    if (value.length > options.maxStringBytes || byteLength(value) > options.maxStringBytes) onDrop?.(key, 'truncated');
 
     return truncateToBytes(value, options.maxStringBytes);
   }
@@ -118,12 +167,12 @@ function visit(
   }
 
   if (typeof value === 'object') {
-    if (path.has(value)) return '[Circular]';
+    if (path.has(value)) return CIRCULAR;
 
     // The server counts payload/context itself as depth 1, so a value that would land at depth 4
     // is what it refuses. Collapse rather than lose the event, and say how much was collapsed.
-    if (depth >= options.maxDepth) {
-      onDrop?.(key, 'depth');
+    if (depth >= options.maxDepth || budget.nodes <= 0) {
+      onDrop?.(key, depth >= options.maxDepth ? 'depth' : 'truncated');
 
       return Array.isArray(value) ? `[Array(${value.length})]` : `[Object(${Object.keys(value as Props).length})]`;
     }
@@ -131,15 +180,24 @@ function visit(
     path.add(value);
     try {
       if (Array.isArray(value)) {
-        return value.map((item, index) => visit(`${key}[${index}]`, item, depth + 1, options, path, onDrop));
+        const items: unknown[] = [];
+        for (let index = 0; index < value.length && budget.nodes > 0; index += 1) {
+          items.push(visit(`${key}[${index}]`, () => value[index], depth + 1, options, path, budget, onDrop) ?? null);
+        }
+        if (items.length < value.length) onDrop?.(key, 'truncated');
+
+        return items;
       }
 
       const out: Props = {};
       for (const childKey of Object.keys(value as Props)) {
         if (isUnsafeKey(childKey)) continue;
-        const child = (value as Props)[childKey];
-        if (child === undefined) continue;
-        out[childKey] = visit(childKey, child, depth + 1, options, path, onDrop);
+        if (budget.nodes <= 0) {
+          onDrop?.(key, 'truncated');
+          break;
+        }
+        const child = visit(childKey, () => (value as Props)[childKey], depth + 1, options, path, budget, onDrop);
+        if (child !== undefined) out[childKey] = child;
       }
 
       return out;
@@ -219,5 +277,44 @@ export function parseJson(text: string | null | undefined): unknown {
     return JSON.parse(text, (key, value: unknown) => (isUnsafeKey(key) ? undefined : value));
   } catch {
     return undefined;
+  }
+}
+
+/** How far down `copyPlain` copies. Below it a value is shared, which `normalize` flattens at send anyway. */
+const COPY_DEPTH = 16;
+
+/**
+ * A copy of plain objects and arrays, for state that one unit of work inherits from another.
+ * Anything else (a Date, a class instance) is kept by reference. It is bounded the way `normalize`
+ * is, in depth and in total values, and for the same reason: what it copies was handed over by the
+ * application and may contain itself, run 20,000 levels deep, or throw when read. A cycle becomes
+ * `[Circular]` and a value that throws becomes `[Unreadable]`, which is what would have been sent.
+ */
+export function copyPlain<T>(value: T): T {
+  return copyValue(value, 0, new Set(), { nodes: MAX_NODES }) as T;
+}
+
+function copyValue(value: unknown, depth: number, path: Set<unknown>, budget: Budget): unknown {
+  budget.nodes -= 1;
+  if (typeof value !== 'object' || value === null || depth >= COPY_DEPTH || budget.nodes <= 0) return value;
+  try {
+    const array = Array.isArray(value);
+    if (!array && Object.getPrototypeOf(value) !== Object.prototype) return value;
+    if (path.has(value)) return CIRCULAR;
+
+    path.add(value);
+    try {
+      if (array) return (value as unknown[]).map((item) => copyValue(item, depth + 1, path, budget));
+      const out: Props = {};
+      for (const key of Object.keys(value)) {
+        if (!isUnsafeKey(key)) out[key] = copyValue((value as Props)[key], depth + 1, path, budget);
+      }
+
+      return out;
+    } finally {
+      path.delete(value);
+    }
+  } catch {
+    return UNREADABLE;
   }
 }
