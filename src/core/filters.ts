@@ -60,12 +60,32 @@ export function isExtensionFile(file: string): boolean {
   return EXTENSION_SCHEMES.some((scheme) => file.startsWith(scheme));
 }
 
+/**
+ * True when any pattern matches. This runs inside the application's own `fetch` and XHR calls, so
+ * an entry that is neither a string nor a RegExp, or a RegExp whose `test` throws, matches nothing
+ * rather than failing the request it was asked about.
+ */
 export function matches(patterns: ReadonlyArray<string | RegExp>, value: string): boolean {
   for (const pattern of patterns) {
-    if (typeof pattern === 'string' ? value.includes(pattern) : pattern.test(value)) return true;
+    try {
+      if (typeof pattern === 'string' ? value.includes(pattern) : pattern instanceof RegExp && pattern.test(value)) return true;
+    } catch {
+      // Not a pattern that can be asked.
+    }
   }
 
   return false;
+}
+
+/** The usable entries of a pattern list from the options, with `onInvalid` told about each one dropped. */
+export function toPatterns(value: unknown, onInvalid: (index: number) => void): Array<string | RegExp> {
+  const out: Array<string | RegExp> = [];
+  (Array.isArray(value) ? value : []).forEach((pattern: unknown, index) => {
+    if ((typeof pattern === 'string' && pattern !== '') || pattern instanceof RegExp) out.push(pattern);
+    else onInvalid(index);
+  });
+
+  return out;
 }
 
 /**

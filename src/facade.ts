@@ -1,3 +1,4 @@
+import { safeString, show } from './core/guard.js';
 import { Scope } from './node/scope.js';
 import type { Platform, Vinktar } from './client.js';
 import { Vinktar as Client } from './client.js';
@@ -12,6 +13,9 @@ import type { Breadcrumb, CaptureContext, EventOptions, IdentifyOptions, Props, 
  * warning surfaces on the first run, where a buffer would hide it and replay stale events with
  * the wrong scope later. `withScope` is the one exception: the work still runs, on a throwaway
  * scope, because the callback is the application's code and must not be skipped.
+ *
+ * Every function here forwards to a client method, and those never throw. `init()` does not throw
+ * either: options it cannot use, a missing key included, leave an inert client and a logged line.
  *
  * The default client is held on `globalThis`, so an application that ends up loading both the
  * CommonJS and the ES module build of this package (a dependency requires one, the app imports
@@ -70,7 +74,14 @@ export function createFacade(platform: Platform, warn: (message: string) => void
 
         return state.client;
       }
-      state.client = new Client(options, platform);
+      try {
+        state.client = new Client(options, platform);
+      } catch (error) {
+        // The constructor guards everything it does. Should something get past that, the
+        // application still gets a client, one that does nothing.
+        warn(`init() failed, so nothing will be sent: ${safeString(error)}`);
+        state.client = new Client({ enabled: false, logger: () => {} }, platform);
+      }
 
       return state.client;
     },
@@ -93,7 +104,13 @@ export function createFacade(platform: Platform, warn: (message: string) => void
     setTags: (tags) => need('setTags')?.setTags(tags),
     setContext: (context) => need('setContext')?.setContext(context),
     scope: () => need('scope')?.scope() ?? new Scope(0),
-    withScope: (work) => (state.client !== null ? state.client.withScope(work) : work(new Scope(0))),
+    withScope: (work) => {
+      if (state.client !== null) return state.client.withScope(work);
+      if (typeof work === 'function') return work(new Scope(0));
+      warn(`withScope() needs a function to run, not ${show(work)}; nothing was run`);
+
+      return undefined as never;
+    },
     enterScope: () => need('enterScope')?.enterScope() ?? new Scope(0),
     scopeFromHeaders: (headers) => need('scopeFromHeaders')?.scopeFromHeaders(headers) ?? new Scope(0),
     registerHandlers: () => need('registerHandlers')?.registerHandlers(),

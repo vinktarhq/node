@@ -161,7 +161,17 @@ class Coordinator {
   }
 
   private onUncaught(error: unknown, origin: unknown): void {
-    if (this.handling) return; // an error while reporting an error: let the runtime's default decide
+    if (this.handling) {
+      // A second one while the first is still being flushed. It is not reported (the process is
+      // already on its way out), but it is printed, as node would have printed it.
+      try {
+        console.error(error);
+      } catch {
+        // No console to print to.
+      }
+
+      return;
+    }
     this.handling = true;
     const clients = [...this.crash];
     // Under Node's default --unhandled-rejections=throw, a rejection nobody handled arrives here.

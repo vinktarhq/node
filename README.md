@@ -56,9 +56,11 @@ throws into your code.** Everything the SDK cannot send is said out loud in the 
 ## Getting a key
 
 A server can use either the project's write key (`vnk_pk_…`) or a secret key (`vnk_sk_…`); both
-can append events. Keys are created in the project settings. Without a key, `init()` throws:
-a server with no key is misconfigured, and that belongs in the first deploy's logs rather than in a
-dashboard weeks later. The one exception is `enabled: false`, which needs no key and does nothing.
+can append events. Keys are created in the project settings. Without a key, `init()` logs one
+error, so a misconfigured server shows up in the first deploy's logs rather than in a dashboard
+weeks later, and the client is inert from then on: every call is a no-op and `flush()` and `close()`
+resolve `true`, exactly as with `enabled: false`. It does not throw. A missing analytics key is
+not a reason for your service to fail to start.
 
 ## Analytics
 
@@ -322,9 +324,9 @@ it, and belongs to one process: give each process its own path.
 
 ## Nothing is showing up?
 
-Read the logs. The SDK never fails silently: a missing key throws, an option out of range warns,
-a dropped property, a refused trait, a rejected batch and a rate limit each print one line that
-says what happened. `debug: true` adds the rest.
+Read the logs. The SDK never fails silently: a missing key logs an error, an option out of range
+warns, and a dropped property, a refused trait, a rejected batch and a rate limit each print one
+line that says what happened. `debug: true` adds the rest.
 
 The three usual causes: the process exited before the batch went out (call `close()`, or use
 `flushIfServerless` in a function); a proxy in the way (pass a `fetch` that knows about it); or

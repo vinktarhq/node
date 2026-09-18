@@ -25,8 +25,13 @@ afterEach(async () => {
 });
 
 describe('init', () => {
-  it('throws without a key and reads one from the environment', () => {
-    expect(() => new Vinktar({ logger, fetch: harness?.fetch }, { ...nodePlatform, environment: { env: () => undefined, hostname: () => 'h', cwd: () => '/' } })).toThrow(/no write key/);
+  it('is inert without a key, says so once, and reads one from the environment', async () => {
+    const levels: string[] = [];
+    const keyless = new Vinktar({ logger: (level) => void levels.push(level), fetch: makeHarness().fetch }, { ...nodePlatform, environment: { env: () => undefined, hostname: () => 'h', cwd: () => '/' } });
+    open.push(keyless);
+    keyless.track('ignored');
+    expect(await keyless.flush()).toBe(true);
+    expect(levels).toEqual(['error']);
     const client = new Vinktar({ logger, autoFlush: false }, { ...nodePlatform, environment: { env: (n) => (n === 'VINKTAR_KEY' ? KEY : n === 'VINKTAR_RELEASE' ? 'r1' : undefined), hostname: () => 'h', cwd: () => '/' } });
     open.push(client);
     expect(client.version).toBeTypeOf('string');

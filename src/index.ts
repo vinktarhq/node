@@ -39,7 +39,14 @@ export const nodePlatform: Platform = {
         return '';
       }
     },
-    cwd: () => process.cwd(),
+    cwd: () => {
+      // Throws when the working directory has been deleted under the process.
+      try {
+        return process.cwd();
+      } catch {
+        return '';
+      }
+    },
   },
   compress: (text) =>
     new Promise((resolve) => {

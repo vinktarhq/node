@@ -1,5 +1,7 @@
-import { Breadcrumbs, type Breadcrumb } from '../core/breadcrumbs.js';
-import type { Props } from '../core/normalize.js';
+import { validUserId } from '../core/blocked.js';
+import { Breadcrumbs, toBreadcrumb, type Breadcrumb } from '../core/breadcrumbs.js';
+import { attempt, isObject, safeString, show } from '../core/guard.js';
+import { copyPlain, type Props } from '../core/normalize.js';
 import type { RequestInfo } from '../types.js';
 
 /**
@@ -15,6 +17,12 @@ import type { RequestInfo } from '../types.js';
  * other's scope. `fork()` is for nesting (a child inherits a copy of its parent). `detached()` is for
  * a boundary: a new request or job carries what was set for the whole process (tags, context and
  * properties set outside any request, at startup) and never an actor, a request or breadcrumbs.
+ *
+ * A scope is handed to the application (`scope()`, `withScope`, `enterScope`), so its methods are
+ * public entry points like the client's: an argument of the wrong type is refused with a warning,
+ * and nothing a value does when it is read (a getter that throws, a Proxy) leaves the method.
+ * What is stored is whatever the application passed, cycles included; copying it for a child is
+ * bounded (`copyPlain`), and it is normalised when it is sent.
  */
 export interface ScopeSeed {
   readonly userId?: string;
@@ -44,6 +52,8 @@ export class Scope {
   constructor(
     private readonly maxBreadcrumbs: number,
     seed?: ScopeSeed,
+    /** Where a refused argument is said. The client passes its logger; a scope made by hand is quiet. */
+    private readonly warn: (message: string) => void = () => {},
   ) {
     this.breadcrumbs = new Breadcrumbs(maxBreadcrumbs);
     if (seed !== undefined) this.apply(seed);
@@ -55,50 +65,76 @@ export class Scope {
   }
 
   apply(seed: ScopeSeed): void {
-    if (seed.userId !== undefined) this.userId = seed.userId;
-    if (seed.deviceId !== undefined) this.deviceId = seed.deviceId;
-    if (seed.sessionId !== undefined) this.sessionId = seed.sessionId;
-    if (seed.tags !== undefined) Object.assign(this.tags, seed.tags);
-    if (seed.context !== undefined) Object.assign(this.context, copy(seed.context));
+    this.guard('apply', () => {
+      if (!isObject(seed)) return;
+      if (typeof seed.userId === 'string') this.userId = seed.userId;
+      if (typeof seed.deviceId === 'string') this.deviceId = seed.deviceId;
+      if (typeof seed.sessionId === 'string') this.sessionId = seed.sessionId;
+      if (isObject(seed.tags)) this.setTags(seed.tags as Record<string, string>);
+      if (isObject(seed.context)) Object.assign(this.context, copyPlain(seed.context));
+    });
   }
 
   setTag(key: string, value: string): void {
-    if (typeof key === 'string' && key !== '') this.tags[key] = String(value);
+    this.guard('setTag', () => {
+      if (typeof key !== 'string' || key === '') return this.refuse('setTag', 'a key', key);
+      this.tags[key] = safeString(value);
+    });
   }
 
   setTags(tags: Record<string, string>): void {
-    if (typeof tags === 'object' && tags !== null) for (const [key, value] of Object.entries(tags)) this.setTag(key, value);
+    this.guard('setTags', () => {
+      if (!isObject(tags)) return this.refuse('setTags', 'an object of tags', tags);
+      for (const key of Object.keys(tags)) this.setTag(key, tags[key] as string);
+    });
   }
 
   /** Merge into the error context; `null` clears it. */
   setContext(context: Props | null): void {
-    if (context === null) this.context = {};
-    else if (typeof context === 'object') Object.assign(this.context, context);
+    this.guard('setContext', () => {
+      if (context === null) this.context = {};
+      else if (isObject(context)) Object.assign(this.context, context);
+      else this.refuse('setContext', 'an object or null', context);
+    });
   }
 
-  /** Clears the user only. The device and everything else stay; see `reset()` for the rest. */
+  /** `undefined` clears the user only. The device and everything else stay; see `reset()` for the rest. */
   setUser(userId: string | undefined): void {
-    this.userId = userId;
+    this.guard('setUser', () => {
+      const id = userId === undefined || userId === null ? undefined : validUserId(userId);
+      if (id === null) return this.refuse('setUser', 'a usable user id', userId);
+      this.userId = id;
+    });
   }
 
   setRequest(request: RequestInfo | undefined): void {
-    this.request = request;
+    this.request = isObject(request) ? request : undefined;
   }
 
-  addBreadcrumb(crumb: Breadcrumb): void {
-    this.breadcrumbs.add(crumb);
+  addBreadcrumb(crumb: Partial<Breadcrumb>): void {
+    this.guard('addBreadcrumb', () => {
+      const shaped = toBreadcrumb(crumb, Date.now);
+      if (shaped !== null) this.breadcrumbs.add(shaped);
+    });
   }
 
   register(properties: Props): void {
-    Object.assign(this.properties, properties);
+    this.guard('register', () => {
+      if (!isObject(properties)) return this.refuse('register', 'an object of properties', properties);
+      Object.assign(this.properties, properties);
+    });
   }
 
   registerOnce(properties: Props): void {
-    for (const [key, value] of Object.entries(properties)) if (!(key in this.properties)) this.properties[key] = value;
+    this.guard('registerOnce', () => {
+      if (!isObject(properties)) return this.refuse('registerOnce', 'an object of properties', properties);
+      for (const key of Object.keys(properties)) if (!(key in this.properties)) this.properties[key] = properties[key];
+    });
   }
 
   unregister(key: string): void {
-    delete this.properties[key];
+    if (typeof key === 'string') delete this.properties[key];
+    else this.refuse('unregister', 'a property name', key);
   }
 
   /**
@@ -106,12 +142,12 @@ export class Scope {
    * `context.order.total` does not change its parent's.
    */
   fork(): Scope {
-    const child = new Scope(this.maxBreadcrumbs, { tags: this.tags, context: this.context });
+    const child = new Scope(this.maxBreadcrumbs, { tags: this.tags, context: this.context }, this.warn);
     child.userId = this.userId;
     child.deviceId = this.deviceId;
     child.sessionId = this.sessionId;
     child.request = this.request;
-    child.properties = copy(this.properties);
+    child.properties = copyPlain(this.properties);
     for (const crumb of this.breadcrumbs.list()) child.breadcrumbs.add(crumb);
 
     return child;
@@ -122,8 +158,8 @@ export class Scope {
    * and nothing that identifies anyone or belongs to earlier work.
    */
   detached(): Scope {
-    const scope = new Scope(this.maxBreadcrumbs, { tags: this.tags, context: this.context });
-    scope.properties = copy(this.properties);
+    const scope = new Scope(this.maxBreadcrumbs, { tags: this.tags, context: this.context }, this.warn);
+    scope.properties = copyPlain(this.properties);
 
     return scope;
   }
@@ -138,8 +174,15 @@ export class Scope {
     this.properties = {};
     this.request = undefined;
     this.breadcrumbs.clear();
-    if (defaults.tags !== undefined) Object.assign(this.tags, defaults.tags);
-    if (defaults.context !== undefined) Object.assign(this.context, copy(defaults.context));
+    this.apply({ ...(isObject(defaults?.tags) ? { tags: defaults.tags } : {}), ...(isObject(defaults?.context) ? { context: defaults.context } : {}) });
+  }
+
+  private guard(method: string, work: () => void): void {
+    attempt(work, undefined, (error) => this.warn(`scope.${method}() was given a value that could not be read, and ignored it: ${safeString(error)}`));
+  }
+
+  private refuse(method: string, wanted: string, got: unknown): void {
+    this.warn(`scope.${method}() needs ${wanted}, not ${show(got)}; nothing was set`);
   }
 }
 
@@ -193,13 +236,25 @@ export function stackScopeStore(root: Scope, onOverlap: () => void = () => {}): 
         leave(scope);
         throw error;
       }
-      if (typeof (result as Promise<unknown>)?.then === 'function') {
+      if (isThenable(result)) {
         pending += 1;
-
-        return (result as Promise<unknown>).finally(() => {
+        const settled = (): void => {
           pending -= 1;
           leave(scope);
-        }) as ReturnType<typeof fn>;
+        };
+
+        // The same value or the same rejection, once the scope has been left.
+        return result.then(
+          (value) => {
+            settled();
+
+            return value;
+          },
+          (error: unknown) => {
+            settled();
+            throw error;
+          },
+        ) as ReturnType<typeof fn>;
       }
       leave(scope);
 
@@ -212,12 +267,10 @@ export function stackScopeStore(root: Scope, onOverlap: () => void = () => {}): 
   };
 }
 
-/** A copy of plain objects and arrays, all the way down; anything else is kept by reference. */
-function copy<T>(value: T): T {
-  if (Array.isArray(value)) return value.map(copy) as T;
-  if (typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype) {
-    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, copy(inner)])) as T;
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  try {
+    return typeof (value as PromiseLike<unknown> | undefined)?.then === 'function';
+  } catch {
+    return false;
   }
-
-  return value;
 }

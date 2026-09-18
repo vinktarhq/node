@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.3.0
+
+The SDK must never break the application it is installed in, whatever it is handed. This release
+closes the places where it could, and changes what `init()` does without a key: read "Changed".
+
+### Changed
+
+- `init()` never throws. Without a key it used to throw a `TypeError`; it now logs one error and
+  the client is inert: every call is a no-op, `flush()` and `close()` resolve `true`, and the
+  process, the console, `fetch` and the spool are left alone, exactly as with `enabled: false`.
+  If you relied on the throw to catch a missing `VINKTAR_KEY` at startup, check for the key yourself.
+- `withScope()` given anything but a function logs a warning and returns `undefined`. It used to
+  throw a `TypeError`. What your callback throws still goes straight back to you.
+- `scope.setUser()` takes a usable user id or `undefined`, as `identify()` does, and
+  `scope.addBreadcrumb()` shapes what it is given the way `addBreadcrumb()` does. A scope method
+  given the wrong type logs a warning and changes nothing.
+- Entries of `ignoreErrors` that are neither a string nor a `RegExp` are dropped with a warning,
+  and so are entries of `redactedKeys`, `propertyDenylist` and `enabledEnvironments` that are not
+  strings. A `null` in `redactedKeys` used to become the fragment `"null"`.
+
+### Fixed
+
+- A plain object that contains itself, once stored with `register()`, `setContext()` or
+  `initialScope`, made every later `withScope()`, `enterScope()` and every request through the
+  Express, Fastify and Nest adapters throw a `RangeError`. Scopes are copied with a bound on depth
+  and on the number of values, and a cycle is copied as `[Circular]`.
+- The adapters always hand on. `next()` runs whatever happens inside the SDK, the error middleware
+  always calls `next(error)` with the application's error, a Fastify hook never passes an error to
+  `done()`, the Nest filter never throws anything but the exception it was given, and the
+  `finish` listener on the response cannot throw into `res.end()`.
+- The `fetch` wrapper calls the original with exactly the arguments it was given and fails the way
+  `fetch` does: `fetch(undefined)` is a rejected promise again, not a synchronous `TypeError`, and
+  a `method` that is not a string no longer throws. The `console` wrappers return what the
+  original returned.
+- `addPendingWork()` no longer turns a rejection the caller had already handled into an unhandled
+  one, and ignores, with a warning, anything that is not a promise.
+- `flushIfServerless()` always resolves: with options that are not an object, and when the
+  platform's `waitUntil()` throws, in which case the flush is awaited inline.
+- `page()` with properties that are not an object, `scope().registerOnce(undefined)`,
+  `scopeFromHeaders()` with headers that throw when read, and `init(null)` no longer throw.
+- A `console` or `fetch` that cannot be patched (frozen, or read-only in a hardened runtime) is
+  skipped with a warning instead of making `init()` throw, and so are a working directory that no
+  longer exists and an `asyncLocalStorage` that cannot be constructed.
+- A property whose getter throws costs that property, recorded as `[Unreadable]`, instead of the
+  whole event. Normalising is bounded by the number of values visited as well as by depth.
+- A second uncaught exception that arrives while the first is still being flushed is printed with
+  `console.error`. It used to disappear.
+- `flush()` and `close()` always resolve; a failure inside them is `false`, never a rejection.
+
 ## 0.2.1
 
 ### Fixed
