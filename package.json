@@ -1,6 +1,6 @@
 {
   "name": "@vinktarhq/node",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Vinktar for Node.js and edge runtimes: product analytics and error tracking with request-scoped identity.",
   "keywords": [
     "vinktar",

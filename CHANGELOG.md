@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 The SDK must never break the application it is installed in, whatever it is handed. This release
 closes the places where it could, and changes what `init()` does without a key: read "Changed".
