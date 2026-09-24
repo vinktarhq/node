@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - A client switched off with `enabled: false` no longer logs `inert: enabled is false` as a
   warning when it is created. Turning the SDK off is a decision, not a problem, so only `debug: true`
