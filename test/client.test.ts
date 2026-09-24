@@ -37,6 +37,15 @@ describe('init', () => {
     expect(client.version).toBeTypeOf('string');
   });
 
+  it('says nothing when switched off on purpose', async () => {
+    const said: string[] = [];
+    const off = new Vinktar({ enabled: false, logger: (level, message) => void said.push(`${level}: ${message}`), fetch: makeHarness().fetch }, { ...nodePlatform, environment: { env: () => undefined, hostname: () => 'h', cwd: () => '/' } });
+    open.push(off);
+    off.track('ignored');
+    expect(await off.flush()).toBe(true);
+    expect(said).toEqual([]);
+  });
+
   it('accepts a bare key string', () => {
     const client = new Vinktar(KEY, nodePlatform);
     open.push(client);
