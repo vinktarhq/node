@@ -332,6 +332,8 @@ export function resolve(options: VinktarOptions, environment: Environment, logge
   };
 
   if (keyless) logger.error('no write key: pass { writeKey } to init() or set VINKTAR_KEY. Nothing will be sent until there is one');
+  // Switched off on purpose is a decision, not a problem: only debug output mentions it.
+  else if (!enabled && broken === undefined) logger.debug('inert: enabled is false');
   else if (inert !== null) logger.warn(`inert: ${inert}`);
 
   return resolved;

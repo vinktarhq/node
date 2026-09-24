@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A client switched off with `enabled: false` no longer logs `inert: enabled is false` as a
+  warning when it is created. Turning the SDK off is a decision, not a problem, so only `debug: true`
+  mentions it. A missing or refused key is still an error, once.
+
 ## 0.3.0
 
 The SDK must never break the application it is installed in, whatever it is handed. This release
