@@ -5,6 +5,10 @@
     "maxSourcemapBodyBytes": 62914560,
     "gzipEncodings": [
       "gzip"
+    ],
+    "sentryEncodings": [
+      "gzip",
+      "deflate"
     ]
   },
   "batch": {
