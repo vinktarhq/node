@@ -14,6 +14,8 @@ served for, so a backend error sits next to the browser events that led to it in
 nothing one request or job sets reaches another, and nothing one client sets reaches another
 client's project.
 
+The setup guide, and how to check that data arrives: [vinktar.com/docs/install/node](https://vinktar.com/docs/install/node).
+
 ```ts
 import { init, track, captureException } from '@vinktarhq/node';
 import { vinktarRequest, vinktarErrors } from '@vinktarhq/node/express';

@@ -13,7 +13,7 @@
     "nestjs",
     "edge"
   ],
-  "homepage": "https://vinktar.com",
+  "homepage": "https://vinktar.com/docs/install/node",
   "bugs": {
     "url": "https://github.com/vinktarhq/node/issues"
   },
