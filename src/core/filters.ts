@@ -1,14 +1,11 @@
 import type { Frame } from './stack.js';
 
 /**
- * Local noise filtering, applied before anything costs a request or a rate-limit token.
- *
- * The deny list MIRRORS the server's (`spec/inbound-filter.json`, asserted set-equal by a test),
- * and that cuts both ways: the server silently suppresses these strings, so the SDK must never
- * emit one of them for an error the customer wanted kept.
+ * Known noise, the same sets the server labels (`spec/inbound-filter.json`, asserted set-equal by a
+ * test). Sent by default and labelled "Likely noise" there; dropped here only with `ignoreKnownNoise`.
  */
 
-/** Suppressed server-side. Mirrored so known noise costs nothing. */
+/** Labelled as likely noise by the server. */
 export const DENY_MESSAGES: readonly string[] = [
   'ResizeObserver loop limit exceeded',
   'ResizeObserver loop completed with undelivered notifications',
@@ -28,9 +25,8 @@ export const EXTENSION_SCHEMES: readonly string[] = [
 ];
 
 /**
- * Browser noise nobody can action, shipped as the default ignore list: ad blockers, wallet
- * extensions, in-app webviews, tag managers. Each of these is something a page produces that its
- * author cannot fix.
+ * Browser noise a page's author usually cannot fix: ad blockers, wallet extensions, in-app
+ * webviews, tag managers.
  */
 export const DEFAULT_IGNORE: readonly RegExp[] = [
   /^Script error\.?$/,
@@ -48,12 +44,12 @@ export const DEFAULT_IGNORE: readonly RegExp[] = [
   /^Loading (?:CSS )?chunk \d+ failed/,
 ];
 
-export function isServerSuppressed(message: string, frames: readonly Frame[]): boolean {
+export function isKnownNoise(message: string, frames: readonly Frame[]): boolean {
   for (const deny of DENY_MESSAGES) {
     if (message.includes(deny)) return true;
   }
 
-  return frames.length > 0 && frames.every((frame) => isExtensionFile(frame.file));
+  return (frames.length > 0 && frames.every((frame) => isExtensionFile(frame.file))) || matches(DEFAULT_IGNORE, message);
 }
 
 export function isExtensionFile(file: string): boolean {

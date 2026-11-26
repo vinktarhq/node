@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Errors whose message is on the known-noise list (`Script error.`, ResizeObserver loops and the
+  rest of `spec/inbound-filter.json`) are sent by default instead of dropped. Vinktar keeps them,
+  labels them as likely noise and lists them low. `ignoreKnownNoise: true` drops them as before.
+
 ## 0.3.1
 
 - A client switched off with `enabled: false` no longer logs `inert: enabled is false` as a

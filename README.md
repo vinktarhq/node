@@ -302,6 +302,7 @@ it, and belongs to one process: give each process its own path.
 | `maxEventsPerMinute` / `maxErrorsPerMinute` | `6000` / `100` | |
 | `dedupe` | `true` | The same error for the same user once per five seconds; repeats are counted. |
 | `ignoreErrors` | `[]` | Strings (substring) or regular expressions. |
+| `ignoreKnownNoise` | `false` | Drop known noise here instead of sending it; off, Vinktar labels it as likely noise. |
 | `superProperties` | `{}` | On every event. |
 | `sendDefaultPii` | `false` | Full URLs, query strings, and request headers beyond the safe set. |
 | `redactedKeys` / `propertyDenylist` | `[]` | |

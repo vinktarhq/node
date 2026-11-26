@@ -179,7 +179,7 @@ describe('server diagnostics', () => {
       suppressed: 2,
     });
     expect(lines).toHaveLength(4);
-    expect(lines.join('\n')).toContain('suppressed 2 errors');
+    expect(lines.join('\n')).toContain('dropped 2 errors by a project rule');
   });
 });
 

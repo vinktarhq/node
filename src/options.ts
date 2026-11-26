@@ -79,6 +79,8 @@ export interface VinktarOptions {
   maxEventsPerMinute?: number;
   dedupe?: boolean;
   ignoreErrors?: Array<string | RegExp>;
+  /** Drop known noise (Script error., ResizeObserver loops, extension-only stacks) here instead of sending it. Off: Vinktar labels it as likely noise. */
+  ignoreKnownNoise?: boolean;
 
   superProperties?: Props;
   /** Keep full URLs and request headers beyond the safe set. */
@@ -135,6 +137,7 @@ export interface Resolved {
   readonly maxEventsPerMinute: number;
   readonly dedupe: boolean;
   readonly ignoreErrors: ReadonlyArray<string | RegExp>;
+  readonly ignoreKnownNoise: boolean;
   readonly superProperties: Props;
   readonly sendDefaultPii: boolean;
   readonly redactedKeys: readonly string[];
@@ -169,7 +172,7 @@ const KNOWN = new Set<keyof VinktarOptions>([
   'writeKey', 'key', 'host', 'enabled', 'debug', 'analytics', 'errors', 'release', 'environment', 'enabledEnvironments',
   'serverName', 'initialScope', 'flushAt', 'flushIntervalMs', 'maxQueueSize', 'requestTimeoutMs', 'gzip', 'shutdownTimeout',
   'spoolPath', 'autoFlush', 'handleSignals', 'captureErrors', 'unhandledRejections', 'breadcrumbs', 'maxBreadcrumbs', 'sampleRate',
-  'errorSampleRate', 'maxErrorsPerMinute', 'maxEventsPerMinute', 'dedupe', 'ignoreErrors', 'superProperties',
+  'errorSampleRate', 'maxErrorsPerMinute', 'maxEventsPerMinute', 'dedupe', 'ignoreErrors', 'ignoreKnownNoise', 'superProperties',
   'sendDefaultPii', 'redactedKeys', 'propertyDenylist', 'maxValueBytes', 'normalizeDepth', 'includeRawStack',
   'attachStacktrace', 'projectRoot', 'contextLines', 'beforeSend', 'beforeTrack', 'beforeBreadcrumb', 'onError', 'logger',
   'fetch', 'asyncLocalStorage',
@@ -311,6 +314,7 @@ export function resolve(options: VinktarOptions, environment: Environment, logge
     maxEventsPerMinute: clamp('maxEventsPerMinute', options.maxEventsPerMinute, 1, 600_000, 6000),
     dedupe: options.dedupe ?? true,
     ignoreErrors: patterns('ignoreErrors', options.ignoreErrors),
+    ignoreKnownNoise: options.ignoreKnownNoise === true,
     superProperties: isObject(options.superProperties) ? options.superProperties : {},
     sendDefaultPii: options.sendDefaultPii ?? false,
     redactedKeys: strings('redactedKeys', options.redactedKeys),

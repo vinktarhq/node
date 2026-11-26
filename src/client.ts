@@ -4,7 +4,7 @@ import { truncateToBytes } from './core/bytes.js';
 import { Dedupe, KeyedValve, Valve } from './core/dedupe.js';
 import { Dispatcher } from './core/dispatcher.js';
 import { coerce, CORE_COERCERS, exceptionKey, fromMessage, isMeaningless, issueKey, type WireException } from './core/exception.js';
-import { isServerSuppressed, matches } from './core/filters.js';
+import { isKnownNoise, matches } from './core/filters.js';
 import { attempt, isObject, safeString, show } from './core/guard.js';
 import { runHooks } from './core/hooks.js';
 import { hexId, uuidv7 } from './core/ids.js';
@@ -482,7 +482,12 @@ export class Vinktar {
     const first = exceptions[0]!;
     const message = first.value;
 
-    if (isServerSuppressed(message, first.stack)) return '';
+    // Sent by default: the server keeps known noise and labels it, so a wrong match is still visible there.
+    if (this.o.ignoreKnownNoise && isKnownNoise(message, first.stack)) {
+      this.logger.debug('known noise, ignoreKnownNoise is on; not sent', { message });
+
+      return '';
+    }
     if (this.o.ignoreErrors.length > 0 && (matches(this.o.ignoreErrors, message) || matches(this.o.ignoreErrors, `${first.type}: ${message}`))) {
       this.logger.debug('ignored by ignoreErrors', { message });
 

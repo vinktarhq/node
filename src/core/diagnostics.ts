@@ -48,7 +48,7 @@ export function serverDiagnostics(body: unknown): string[] {
 
   const suppressed = Number(payload['suppressed'] ?? 0);
   if (suppressed > 0) {
-    lines.push(`server suppressed ${suppressed} error${suppressed === 1 ? '' : 's'} as known noise (not stored, not billed)`);
+    lines.push(`server dropped ${suppressed} error${suppressed === 1 ? '' : 's'} by a project rule or auto-ignore (not stored, not billed)`);
   }
 
   return lines;

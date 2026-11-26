@@ -189,6 +189,18 @@ describe('errors', () => {
     expect(harness.errors()).toHaveLength(1);
   });
 
+  it('sends known noise unless ignoreKnownNoise is on', async () => {
+    const sending = make();
+    sending.captureException(new Error('Script error.'));
+    await sending.flush();
+    expect(harness.errors()).toHaveLength(1);
+
+    const ignoring = make({ ignoreKnownNoise: true });
+    ignoring.captureException(new Error('ResizeObserver loop limit exceeded'));
+    await ignoring.flush();
+    expect(harness.errors()).toHaveLength(0);
+  });
+
   it('non-Error rejections get a readable value under a type the server keeps', async () => {
     const client = make();
     client.registerHandlers();

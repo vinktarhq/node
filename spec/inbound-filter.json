@@ -1,5 +1,5 @@
 {
-  "$comment": "Messages and frame schemes the server suppresses. Mirrored locally so known noise never costs a request; never emit these exact strings for errors you want kept.",
+  "$comment": "Messages, frame schemes and patterns the server labels as likely noise. It keeps them unless the project turns a set to auto-ignore. Send them by default; drop them locally only when the customer opts in.",
   "denyMessageSubstrings": [
     "ResizeObserver loop limit exceeded",
     "ResizeObserver loop completed with undelivered notifications",
